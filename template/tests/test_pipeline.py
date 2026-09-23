@@ -20,6 +20,7 @@ from papers_pipeline.errors import ConfigError, InfrastructureError, PaperError
 from papers_pipeline.git import GitRepository
 from papers_pipeline.models import SourceRecord
 from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
+from papers_pipeline.state import load_state
 
 NOW = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
 
@@ -44,8 +45,14 @@ class FakeAdapter:
     record_sources = frozenset({"arxiv"})
     window_type = FetchWindow
 
-    def __init__(self, records: Sequence[SourceRecord]) -> None:
+    def __init__(
+        self,
+        records: Sequence[SourceRecord],
+        *,
+        capped: bool = False,
+    ) -> None:
         self.records = tuple(records)
+        self.capped = capped
         self.calls = 0
 
     async def fetch(self, *_args: Any, **_kwargs: Any) -> FetchPage:
@@ -53,7 +60,7 @@ class FakeAdapter:
         return FetchPage(
             records=self.records,
             next_cursor=None,
-            capped=False,
+            capped=self.capped,
         )
 
 
@@ -80,9 +87,11 @@ class FakeRunner(CommandRunner):
         self,
         paper_failures: set[str] | None = None,
         infrastructure_error: InfrastructureError | None = None,
+        formatter_error: InfrastructureError | None = None,
     ) -> None:
         self.paper_failures = paper_failures or set()
         self.infrastructure_error = infrastructure_error
+        self.formatter_error = formatter_error
         self.calls: list[list[str]] = []
 
     async def run(
@@ -90,6 +99,8 @@ class FakeRunner(CommandRunner):
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
         if argv[0] == "prettier":
+            if self.formatter_error is not None:
+                raise self.formatter_error
             return subprocess.CompletedProcess(argv, 0, "", "")
         if self.infrastructure_error is not None:
             raise self.infrastructure_error
@@ -103,13 +114,24 @@ class FakeRunner(CommandRunner):
 
 
 class RecordingGit:
-    def __init__(self) -> None:
+    def __init__(self, fail_message: str | None = None) -> None:
         self.messages: list[str] = []
         self.paths: list[tuple[Path, ...]] = []
+        self.clean_checks: list[tuple[Path, ...]] = []
+        self.cleared: list[tuple[Path, ...]] = []
+        self.fail_message = fail_message
+
+    def assert_clean(self, paths: Sequence[Path]) -> None:
+        self.clean_checks.append(tuple(paths))
+
+    def clear_staging(self, paths: Sequence[Path]) -> None:
+        self.cleared.append(tuple(paths))
 
     def commit(self, paths: Sequence[Path], message: str) -> str | None:
         self.messages.append(message)
         self.paths.append(tuple(paths))
+        if message == self.fail_message:
+            raise InfrastructureError(f"git commit failed: {message}")
         return f"commit-{len(self.messages)}"
 
 
@@ -201,6 +223,114 @@ async def test_inventory_commit_precedes_consistent_batch_commit(tmp_path: Path)
     assert summary.succeeded == 1
     assert summary.failed == 1
     assert paths.state in git.paths[1]
+    assert git.clean_checks
+
+
+@pytest.mark.asyncio
+async def test_inventory_commit_failure_restores_inventory_and_state(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    paths.inventory.write_bytes(b"")
+    paths.state.write_bytes(b"cursors:\n  arxiv: prior\nfailures: {}\n")
+    inventory_before = paths.inventory.read_bytes()
+    state_before = paths.state.read_bytes()
+    git = RecordingGit(fail_message="chore: update paper inventory")
+
+    with pytest.raises(InfrastructureError, match="git commit failed"):
+        await run_nightly(
+            paths,
+            dependencies(FakeAdapter([record("one")]), FakeRunner(), git),
+        )
+
+    assert paths.inventory.read_bytes() == inventory_before
+    assert paths.state.read_bytes() == state_before
+    assert git.cleared == [(paths.inventory, paths.state)]
+
+
+@pytest.mark.asyncio
+async def test_formatter_failure_restores_batch_outputs_state_and_index(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    index = paths.root / "README.md"
+    index.write_bytes(b"# Existing index\n")
+    index_before = index.read_bytes()
+    git = RecordingGit()
+    runner = FakeRunner(
+        paper_failures={"bad"},
+        formatter_error=InfrastructureError("formatter failed"),
+    )
+
+    with pytest.raises(InfrastructureError, match="formatter failed"):
+        await run_nightly(
+            paths,
+            dependencies(FakeAdapter([record("good"), record("bad")]), runner, git),
+        )
+
+    assert index.read_bytes() == index_before
+    assert list((paths.root / "papers").glob("*")) == []
+    assert load_state(paths.state).failures == {}
+    assert git.messages == ["chore: update paper inventory"]
+
+
+@pytest.mark.asyncio
+async def test_state_save_failure_restores_batch_outputs_and_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = make_paths(tmp_path)
+    git = RecordingGit()
+
+    def fail_save(path: Path, _state: object) -> None:
+        path.write_text("partial state", encoding="utf-8")
+        raise InfrastructureError("state save failed")
+
+    monkeypatch.setattr("papers_pipeline.pipeline.save_state", fail_save)
+
+    with pytest.raises(InfrastructureError, match="state save failed"):
+        await run_nightly(
+            paths,
+            dependencies(
+                FakeAdapter([record("bad")]),
+                FakeRunner(paper_failures={"bad"}),
+                git,
+            ),
+        )
+
+    assert not paths.state.exists()
+    assert not (paths.root / "README.md").exists()
+    assert list((paths.root / "papers").glob("*")) == []
+    assert git.messages == ["chore: update paper inventory"]
+
+
+@pytest.mark.asyncio
+async def test_batch_commit_failure_rolls_back_and_later_retry_succeeds(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    failing_git = RecordingGit(fail_message="chore: convert paper batch 1")
+
+    with pytest.raises(InfrastructureError, match="git commit failed"):
+        await run_nightly(
+            paths,
+            dependencies(FakeAdapter([record("one")]), FakeRunner(), failing_git),
+        )
+
+    assert not (paths.root / "README.md").exists()
+    assert list((paths.root / "papers").glob("*")) == []
+    assert failing_git.cleared[-1]
+
+    retry_git = RecordingGit()
+    summary = await run_nightly(
+        paths,
+        dependencies(FakeAdapter([record("one")]), FakeRunner(), retry_git),
+    )
+
+    assert summary.succeeded == 1
+    assert (paths.root / "README.md").exists()
+    assert len(list((paths.root / "papers").glob("*.md"))) == 1
+    assert retry_git.messages == ["chore: convert paper batch 1"]
 
 
 @pytest.mark.asyncio
@@ -289,6 +419,22 @@ async def test_no_changes_produce_no_inventory_or_batch_commit(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_capped_source_records_one_continuation_event(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+
+    summary = await run_nightly(
+        paths,
+        dependencies(
+            FakeAdapter([record("one")], capped=True),
+            FakeRunner(),
+            RecordingGit(),
+        ),
+    )
+
+    assert summary.events == ["arxiv: cap reached"]
+
+
+@pytest.mark.asyncio
 async def test_invalid_topic_plugin_is_rejected_before_fetch(
     tmp_path: Path,
 ) -> None:
@@ -346,6 +492,67 @@ def test_git_repository_commits_only_exact_changed_paths_and_deletions(
         cwd=tmp_path,
         text=True,
     ).strip() == "M unrelated.txt"
+
+
+def test_git_repository_rejects_dirty_relevant_paths_but_allows_unrelated_changes(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    relevant = tmp_path / "papers.csv"
+    unrelated = tmp_path / "notes.txt"
+    relevant.write_text("initial\n", encoding="utf-8")
+    unrelated.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    unrelated.write_text("user change\n", encoding="utf-8")
+    repository = GitRepository(tmp_path)
+
+    repository.assert_clean([relevant])
+    relevant.write_text("pipeline collision\n", encoding="utf-8")
+
+    with pytest.raises(
+        InfrastructureError,
+        match=r"uncommitted changes.*commit or stash[\s\S]*papers\.csv",
+    ):
+        repository.assert_clean([relevant])
+
+
+def test_git_repository_staging_cleanup_ignores_paths_not_staged(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    GitRepository(tmp_path).clear_staging([tmp_path / "missing.txt"])
 
 
 def test_format_corpus_cli_selects_only_requested_shard(

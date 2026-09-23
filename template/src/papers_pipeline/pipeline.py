@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from papers_pipeline.adapters.base import Adapter
-from papers_pipeline.batching import infer_backlog, select_batch
+from papers_pipeline.batching import expected_markdown, infer_backlog, select_batch
 from papers_pipeline.config import load_config
 from papers_pipeline.convert import (
     CommandRunner,
@@ -86,6 +86,8 @@ async def run_nightly(
     summary = RunSummary()
 
     with report_infrastructure_failure(paths, summary):
+        dependencies.git.assert_clean(_managed_paths(paths))
+
         with _timed(summary, "fetch", dependencies.monotonic):
             fetched = await fetch_all(
                 config,
@@ -113,15 +115,25 @@ async def run_nightly(
         inventory_changed = inventory != previous_inventory
         state_changed = state != initial_state
         with _timed(summary, "persist_inventory", dependencies.monotonic):
-            if inventory_changed:
-                write_inventory(paths.inventory, inventory)
-            if state_changed:
-                save_state(paths.state, state)
-            if inventory_changed or state_changed:
-                dependencies.git.commit(
-                    [paths.inventory, paths.state],
-                    "chore: update paper inventory",
+            inventory_paths = [paths.inventory, paths.state]
+            inventory_before = _snapshot_files(inventory_paths)
+            try:
+                if inventory_changed:
+                    write_inventory(paths.inventory, inventory)
+                if state_changed:
+                    save_state(paths.state, state)
+                if inventory_changed or state_changed:
+                    dependencies.git.commit(
+                        inventory_paths,
+                        "chore: update paper inventory",
+                    )
+            except BaseException:
+                _rollback_files(
+                    inventory_before,
+                    inventory_paths,
+                    dependencies.git,
                 )
+                raise
 
         attempted: set[str] = set()
         batch_number = 0
@@ -145,55 +157,71 @@ async def run_nightly(
             attempted.update(paper.identifier for paper in batch.papers)
             summary.attempted += len(batch.papers)
             state_before_batch = state
-
-            with _timed(summary, "conversion", dependencies.monotonic):
-                converted = await convert_batch(
-                    batch,
-                    paths.root,
-                    state,
-                    config.concurrency,
-                    dependencies.runner,
-                    dependencies.materializer,
-                    dependencies.now(),
-                )
-            state = converted.state
-            summary.succeeded += len(converted.succeeded)
-            summary.failed += len(converted.failed)
-            summary.promoted_to_fixme += len(converted.promoted)
-            summary.fixme_paths.extend(str(path) for path in converted.promoted)
-            summary.events.extend(
-                (
-                    f"conversion failure: {item.paper.identifier}: "
-                    f"{item.error or 'unknown error'}"
-                )
-                for item in converted.failed
-            )
-
             index_path = paths.root / "README.md"
-            index_before = _file_content(index_path)
-            with _timed(summary, "index", dependencies.monotonic):
-                index = write_index(paths.root, inventory)
-            changed_paths = [
-                item.output
-                for item in converted.succeeded
-                if item.output is not None
-            ]
-            if _file_content(index) != index_before:
-                changed_paths.append(index)
-
-            with _timed(summary, "format", dependencies.monotonic):
-                await format_changed(changed_paths, dependencies.runner)
-
-            commit_paths = [*changed_paths, *converted.promoted]
-            with _timed(summary, "persist_batch", dependencies.monotonic):
-                if state != state_before_batch:
-                    save_state(paths.state, state)
-                    commit_paths.append(paths.state)
-                if commit_paths:
-                    dependencies.git.commit(
-                        commit_paths,
-                        f"chore: convert paper batch {batch_number}",
+            batch_paths = [
+                index_path,
+                paths.state,
+                *(
+                    path
+                    for paper in batch.papers
+                    for path in (
+                        expected_markdown(paths.root, paper),
+                        expected_markdown(paths.root, paper).with_suffix(".fixme.txt"),
                     )
+                ),
+            ]
+            batch_before = _snapshot_files(batch_paths)
+            try:
+                with _timed(summary, "conversion", dependencies.monotonic):
+                    converted = await convert_batch(
+                        batch,
+                        paths.root,
+                        state,
+                        config.concurrency,
+                        dependencies.runner,
+                        dependencies.materializer,
+                        dependencies.now(),
+                    )
+                state = converted.state
+                summary.succeeded += len(converted.succeeded)
+                summary.failed += len(converted.failed)
+                summary.promoted_to_fixme += len(converted.promoted)
+                summary.fixme_paths.extend(str(path) for path in converted.promoted)
+                summary.events.extend(
+                    (
+                        f"conversion failure: {item.paper.identifier}: "
+                        f"{item.error or 'unknown error'}"
+                    )
+                    for item in converted.failed
+                )
+
+                index_before = _file_content(index_path)
+                with _timed(summary, "index", dependencies.monotonic):
+                    index = write_index(paths.root, inventory)
+                changed_paths = [
+                    item.output
+                    for item in converted.succeeded
+                    if item.output is not None
+                ]
+                if _file_content(index) != index_before:
+                    changed_paths.append(index)
+
+                with _timed(summary, "format", dependencies.monotonic):
+                    await format_changed(changed_paths, dependencies.runner)
+
+                commit_paths = [*changed_paths, *converted.promoted]
+                with _timed(summary, "persist_batch", dependencies.monotonic):
+                    if state != state_before_batch:
+                        save_state(paths.state, state)
+                        commit_paths.append(paths.state)
+                    if commit_paths:
+                        dependencies.git.commit(
+                            commit_paths,
+                            f"chore: convert paper batch {batch_number}",
+                        )
+            except BaseException:
+                _rollback_files(batch_before, batch_paths, dependencies.git)
+                raise
             backlog = infer_backlog(inventory, paths.root)
             summary.generated = len(backlog.generated)
             summary.pending = len(backlog.pending)
@@ -252,10 +280,6 @@ def _record_source_results(
                 complete=item.complete,
             )
         )
-        if item.capped:
-            summary.events.append(
-                f"{item.source}: cap reached; continuation persisted"
-            )
         if item.rejected:
             summary.events.append(
                 f"{item.source}: {item.rejected} permanent record failures"
@@ -269,3 +293,40 @@ def _file_content(path: Path) -> bytes | None:
         return path.read_bytes()
     except FileNotFoundError:
         return None
+
+
+def _managed_paths(paths: PipelinePaths) -> list[Path]:
+    return [
+        paths.inventory,
+        paths.state,
+        paths.root / "README.md",
+        paths.root / "papers",
+        paths.root / ".convert-batch",
+        paths.root / "inputs",
+    ]
+
+
+def _snapshot_files(paths: Sequence[Path]) -> dict[Path, bytes | None]:
+    return {path: _file_content(path) for path in paths}
+
+
+def _rollback_files(
+    before: Mapping[Path, bytes | None],
+    transaction_paths: Sequence[Path],
+    git: GitRepository,
+) -> None:
+    rollback_error: OSError | None = None
+    for path, content in before.items():
+        try:
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_name(f"{path.name}.rollback")
+                temporary.write_bytes(content)
+                temporary.replace(path)
+        except OSError as error:
+            rollback_error = rollback_error or error
+    git.clear_staging(transaction_paths)
+    if rollback_error is not None:
+        raise InfrastructureError("pipeline file rollback failed") from rollback_error

@@ -39,3 +39,32 @@ validation before network activity. The full conversion suite also exercises
 partial completion and cancellation cleanup. Self-review confirmed the initial
 inventory/cursor commit occurs before conversion and remains independently
 pushable if a later batch fails.
+
+## Findings remediation
+
+- Added a pre-mutation Git preflight over inventory, state, index, generated
+  papers, conversion workspace, and input-cache paths. Dirty relevant paths now
+  fail with an actionable `InfrastructureError`; unrelated user changes remain
+  untouched.
+- Added exact byte/existence snapshots around inventory persistence and every
+  conversion batch. Inventory/state write or commit failure and conversion,
+  index, formatter, state-save, or batch-commit failure restore the complete
+  transaction write set and clear only its staged paths without `git reset`.
+- Kept the inventory transaction independent, so its successful commit survives
+  a later conversion failure and a subsequent clean retry can process the same
+  backlog.
+- Removed the second synthesized cap/continuation event; the canonical fetch
+  event is now emitted once.
+
+### Additional TDD and verification evidence
+
+Recovery regressions were first observed failing for retained inventory/state,
+promoted output/index files, missing clean-preflight APIs, unsafe cleanup of
+unstaged paths, and duplicate cap events. After implementation:
+
+- Focused pipeline suite: `16 passed`.
+- Full template suite: `188 passed`.
+- Root suite: `2 passed` with only expected Copier dirty-template warnings.
+- Ruff: `All checks passed!`
+- Mypy strict: `Success: no issues found in 26 source files`.
+- `git diff --check`: clean.
