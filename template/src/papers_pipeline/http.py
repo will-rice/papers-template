@@ -13,6 +13,7 @@ from .config import FetchConfig
 from .errors import InfrastructureError
 
 _RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_NON_RETRYABLE_REQUEST_ERROR_MESSAGE = "request failed"
 
 
 @dataclass(frozen=True)
@@ -80,10 +81,13 @@ class RequestClient:
                     headers=headers,
                     timeout=timeout,
                 )
-            except (httpx.TimeoutException, httpx.NetworkError) as error:
-                if attempt == self.config.retries:
-                    raise InfrastructureError(f"request retries exhausted: {url}") from error
-                self.events.append(f"retry {attempt + 1}: network failure for {url}")
+            except httpx.RequestError as error:
+                if self._is_retryable_request_error(error):
+                    if attempt == self.config.retries:
+                        raise InfrastructureError(f"request retries exhausted: {url}") from error
+                    self.events.append(f"retry {attempt + 1}: network failure for {url}")
+                else:
+                    raise self._request_error_to_infrastructure_error(url, error) from error
             else:
                 if response.status_code in {401, 403}:
                     raise InfrastructureError(f"authentication failed: {url}")
@@ -106,6 +110,19 @@ class RequestClient:
 
         raise AssertionError("retry loop exhausted without result")
 
+    def _is_retryable_request_error(self, error: httpx.RequestError) -> bool:
+        return isinstance(
+            error,
+            (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError),
+        )
+
+    def _request_error_to_infrastructure_error(
+        self, url: str, error: httpx.RequestError
+    ) -> InfrastructureError:
+        if isinstance(error, httpx.TooManyRedirects):
+            return InfrastructureError(f"too many redirects: {url}")
+        return InfrastructureError(f"{_NON_RETRYABLE_REQUEST_ERROR_MESSAGE}: {url}")
+
     async def _sleep_with_deadline(self, url: str, attempt: int) -> None:
         delay = self.config.backoff_seconds * (2**attempt)
         if delay <= 0:
@@ -118,4 +135,3 @@ class RequestClient:
                 f"retry {attempt + 1}: deadline-limited backoff for {url}"
             )
         await self._sleep(bounded_delay)
-

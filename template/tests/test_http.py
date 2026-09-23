@@ -135,6 +135,38 @@ async def test_retryable_network_failures_back_off_until_exhausted(
 
 
 @pytest.mark.asyncio
+async def test_retryable_protocol_failures_back_off_until_exhausted(
+    fetch_config: FetchConfig, fake_clock: FakeClock
+) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.RemoteProtocolError("bad framing", request=request)
+
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(30, fake_clock),
+        transport=httpx.MockTransport(handler),
+        sleep=fake_clock.sleep,
+    )
+
+    with pytest.raises(
+        InfrastructureError, match="request retries exhausted: https://example.test"
+    ):
+        await client.get_text("https://example.test", {}, {})
+
+    assert attempts == 4
+    assert fake_clock.sleeps == [1.0, 2.0, 4.0]
+    assert client.events == [
+        "retry 1: network failure for https://example.test",
+        "retry 2: network failure for https://example.test",
+        "retry 3: network failure for https://example.test",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_permanent_401_is_not_retried(
     fetch_config: FetchConfig, fake_clock: FakeClock
 ) -> None:
@@ -153,6 +185,34 @@ async def test_permanent_401_is_not_retried(
     )
 
     with pytest.raises(InfrastructureError, match="authentication failed"):
+        await client.get_text("https://example.test", {}, {})
+
+    assert attempts == 1
+    assert fake_clock.sleeps == []
+    assert client.events == []
+
+
+@pytest.mark.asyncio
+async def test_too_many_redirects_fails_immediately(
+    fetch_config: FetchConfig, fake_clock: FakeClock
+) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.TooManyRedirects("redirect loop", request=request)
+
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(30, fake_clock),
+        transport=httpx.MockTransport(handler),
+        sleep=fake_clock.sleep,
+    )
+
+    with pytest.raises(
+        InfrastructureError, match="too many redirects: https://example.test"
+    ):
         await client.get_text("https://example.test", {}, {})
 
     assert attempts == 1
