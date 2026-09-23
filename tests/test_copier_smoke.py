@@ -1,4 +1,7 @@
 from pathlib import Path
+import os
+import subprocess
+import sys
 
 from copier import run_copy
 
@@ -19,6 +22,22 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     )
     assert (destination / "pyproject.toml").is_file()
     assert (destination / "src/papers_pipeline/__init__.py").is_file()
+    assert (destination / "src/papers_pipeline/cli.py").is_file()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(destination / "src")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from papers_pipeline.cli import app; raise SystemExit(app())",
+        ],
+        cwd=destination,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
     answers = (destination / ".copier-answers.yml").read_text()
     assert "_src_path:" in answers
     assert "template_version: 0.1.0" in answers
