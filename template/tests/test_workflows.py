@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml  # type: ignore[import-untyped]
+import yaml  # type: ignore[import-untyped, unused-ignore]
+
+from papers_pipeline.pipeline import PipelinePaths, _managed_paths
 
 
 class WorkflowLoader(yaml.SafeLoader):  # type: ignore[misc]
@@ -29,6 +31,14 @@ for first_character in "OoYyNn":
 WORKFLOWS = Path(".github/workflows")
 SCRIPTS = Path(".github/scripts")
 PINNED_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
+MANAGED_PATHS = (
+    "papers",
+    "papers.csv",
+    ".papers-state.yml",
+    "README.md",
+    ".convert-batch",
+    "inputs",
+)
 
 
 def workflow(name: str) -> dict[str, Any]:
@@ -96,7 +106,10 @@ def test_nightly_never_runs_a_complete_corpus_glob() -> None:
 def test_format_corpus_is_manual_only_and_opens_a_pr() -> None:
     data = workflow("format-corpus.yml")
     assert set(data["on"]) == {"workflow_dispatch"}
-    assert data["permissions"] == {
+    assert data["permissions"] == {"contents": "read"}
+    assert "permissions" not in data["jobs"]["plan"]
+    assert "permissions" not in data["jobs"]["format"]
+    assert data["jobs"]["combine"]["permissions"] == {
         "contents": "write",
         "pull-requests": "write",
     }
@@ -104,13 +117,38 @@ def test_format_corpus_is_manual_only_and_opens_a_pr() -> None:
     text = (WORKFLOWS / "format-corpus.yml").read_text(encoding="utf-8")
     assert "git push" not in text
     assert "peter-evans/create-pull-request@" in text
-    assert "base: main" in text
+    assert "base: ${{ needs.plan.outputs.base_branch }}" in text
+
+
+def test_feature_branch_dispatch_cannot_contaminate_formatting_pr() -> None:
+    data = workflow("format-corpus.yml")
+    text = (WORKFLOWS / "format-corpus.yml").read_text(encoding="utf-8")
+    assert "github.sha" not in text
+    assert "github.ref" not in text
+    jobs = data["jobs"]
+    plan = jobs["plan"]
+    plan_checkout = plan["steps"][0]
+    assert plan_checkout["with"]["ref"] == (
+        "${{ github.event.repository.default_branch }}"
+    )
+    assert plan["outputs"] == {
+        "base_branch": "${{ github.event.repository.default_branch }}",
+        "base_sha": "${{ steps.base.outputs.sha }}",
+        "matrix": "${{ steps.matrix.outputs.matrix }}",
+    }
+    assert jobs["format"]["needs"] == "plan"
+    assert set(jobs["combine"]["needs"]) == {"plan", "format"}
+    for job_name in ("format", "combine"):
+        checkout = jobs[job_name]["steps"][0]
+        assert checkout["with"]["ref"] == "${{ needs.plan.outputs.base_sha }}"
 
 
 def test_format_corpus_validates_and_builds_deterministic_shards() -> None:
     data = workflow("format-corpus.yml")
     plan = data["jobs"]["plan"]
-    matrix_script = plan["steps"][0]["run"]
+    matrix_script = next(
+        step["run"] for step in plan["steps"] if step.get("id") == "matrix"
+    )
     assert "1 <= count <= 32" in matrix_script
     assert "for index in range(count)" in matrix_script
     assert data["jobs"]["format"]["strategy"]["fail-fast"] is False
@@ -134,7 +172,7 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _nightly_scenario(tmp_path: Path, *, leave_dirty: bool) -> tuple[int, int]:
+def _nightly_scenario(tmp_path: Path, *, dirty_path: str | None) -> tuple[int, int]:
     origin = tmp_path / "origin.git"
     work = tmp_path / "work"
     fake_bin = tmp_path / "bin"
@@ -145,14 +183,23 @@ def _nightly_scenario(tmp_path: Path, *, leave_dirty: bool) -> tuple[int, int]:
     _git(work, "config", "user.name", "Test")
     _git(work, "config", "user.email", "test@example.test")
     (work / "papers.csv").write_text("initial\n", encoding="utf-8")
-    _git(work, "add", "papers.csv")
+    (work / ".gitignore").write_text(".cache/\n", encoding="utf-8")
+    _git(work, "add", "papers.csv", ".gitignore")
     _git(work, "commit", "-q", "-m", "initial")
     _git(work, "remote", "add", "origin", str(origin))
     _git(work, "push", "-q", "-u", "origin", "main")
 
     fake_bin.mkdir()
     uv = fake_bin / "uv"
-    dirty_command = 'printf "inconsistent\\n" >> papers.csv\n' if leave_dirty else ""
+    dirty_command = ""
+    if dirty_path is not None:
+        target = (
+            f"{dirty_path}/leftover"
+            if dirty_path in {"papers", ".convert-batch", "inputs", ".cache"}
+            else dirty_path
+        )
+        (work / target).parent.mkdir(parents=True, exist_ok=True)
+        dirty_command = f'printf "inconsistent\\n" >> "{target}"\n'
     uv.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
@@ -191,15 +238,45 @@ def _nightly_scenario(tmp_path: Path, *, leave_dirty: bool) -> tuple[int, int]:
     return completed.returncode, remote_count
 
 
-@pytest.mark.parametrize("leave_dirty,expected_count", [(False, 2), (True, 1)])
-def test_nightly_pushes_only_consistent_commits_after_failure(
+@pytest.mark.parametrize("dirty_path", MANAGED_PATHS)
+def test_nightly_rejects_dirty_pipeline_paths_after_failure(
     tmp_path: Path,
-    leave_dirty: bool,
-    expected_count: int,
+    dirty_path: str,
 ) -> None:
-    status, remote_count = _nightly_scenario(tmp_path, leave_dirty=leave_dirty)
+    status, remote_count = _nightly_scenario(tmp_path, dirty_path=dirty_path)
     assert status != 0
-    assert remote_count == expected_count
+    assert remote_count == 1
+
+
+@pytest.mark.parametrize("dirty_path", [None, ".cache/http/response"])
+def test_nightly_pushes_consistent_commits_with_clean_or_ignored_cache(
+    tmp_path: Path,
+    dirty_path: str | None,
+) -> None:
+    status, remote_count = _nightly_scenario(tmp_path, dirty_path=dirty_path)
+    assert status != 0
+    assert remote_count == 2
+
+
+def test_nightly_guard_matches_pipeline_managed_paths(tmp_path: Path) -> None:
+    paths = PipelinePaths(
+        root=tmp_path,
+        config=tmp_path / "papers.yml",
+        state=tmp_path / ".papers-state.yml",
+        inventory=tmp_path / "papers.csv",
+        summary=None,
+    )
+    assert tuple(path.relative_to(tmp_path).as_posix() for path in _managed_paths(paths)) == (
+        "papers.csv",
+        ".papers-state.yml",
+        "README.md",
+        "papers",
+        ".convert-batch",
+        "inputs",
+    )
+    script = (SCRIPTS / "nightly.sh").read_text(encoding="utf-8")
+    for path in MANAGED_PATHS:
+        assert f'"{path}"' in script
 
 
 def test_nightly_script_is_executable() -> None:

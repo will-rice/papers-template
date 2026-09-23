@@ -50,3 +50,33 @@ when managed files remain dirty, pushes clean commits even after a later
 pipeline failure, and then preserves the original nonzero status. Confirmed the
 manual combiner skips empty patches and uses GNU version sorting so shard 10
 cannot precede shard 2.
+
+## Findings remediation
+
+- The manual workflow now resolves the repository default branch in `plan`,
+  records its commit SHA, and checks out that same immutable SHA in every
+  formatting shard and in `combine`. The PR base uses the resolved default
+  branch, so a dispatch from a feature branch cannot contribute feature-branch
+  content.
+- Workflow-level permissions are read-only. `plan` and `format` inherit only
+  `contents: read`; only `combine` receives `contents: write` and
+  `pull-requests: write`.
+- The nightly post-run guard now explicitly covers the complete pipeline path
+  set: `papers`, `papers.csv`, `.papers-state.yml`, `README.md`,
+  `.convert-batch`, and `inputs`. Regression tests keep this list aligned with
+  the pipeline guard, exercise dirt under every path, and prove ignored cache
+  content does not block a clean push.
+
+## Remediation verification
+
+- TDD red run exposed the missing job permissions, immutable default-branch
+  base, and complete nightly guard before implementation.
+- Focused workflow suite: `19 passed`.
+- Full template suite: `209 passed`.
+- Copier/render suite: `2 passed` with the expected dirty-template warnings.
+- Ruff: `All checks passed!`.
+- Focused strict mypy: `Success: no issues found in 1 source file`.
+- Full strict mypy remains at the pre-existing baseline: 25 errors in 6
+  unrelated test files.
+- `bash -n`, `git diff --check`, and YAML policy parsing: passed.
+- `actionlint` was not installed, so the optional check was skipped.
