@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -155,49 +156,78 @@ async def test_command_runner_returns_completed_process() -> None:
 
 
 @pytest.mark.asyncio
-async def test_command_runner_maps_missing_tool_to_infrastructure_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def missing_tool(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise FileNotFoundError("missing")
-
-    monkeypatch.setattr(subprocess, "run", missing_tool)
-
-    with pytest.raises(InfrastructureError, match="missing conversion tool: pandoc"):
-        await CommandRunner().run(["pandoc", "input.html"], timeout=5)
+async def test_command_runner_maps_missing_tool_to_infrastructure_error() -> None:
+    with pytest.raises(
+        InfrastructureError,
+        match="missing conversion tool: __missing_pandoc__",
+    ):
+        await CommandRunner().run(["__missing_pandoc__", "input.html"], timeout=5)
 
 
 @pytest.mark.asyncio
-async def test_command_runner_maps_timeout_to_infrastructure_error(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_command_runner_timeout_terminates_child_and_preserves_output(
+    tmp_path: Path,
 ) -> None:
-    def timeout(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired(cmd=["pandoc", "input.html"], timeout=5)
-
-    monkeypatch.setattr(subprocess, "run", timeout)
+    pid_file = tmp_path / "timeout.pid"
+    child = _sleeping_child_script(pid_file)
 
     with pytest.raises(
         InfrastructureError,
-        match="conversion infrastructure timeout: pandoc",
-    ):
-        await CommandRunner().run(["pandoc", "input.html"], timeout=5)
+        match="conversion infrastructure timeout:",
+    ) as exc_info:
+        await CommandRunner().run([sys.executable, "-c", child], timeout=0.1)
+
+    pid = int((await _wait_for_file(pid_file)).strip())
+    await _assert_process_gone(pid)
+    timeout_error = exc_info.value.__cause__
+    assert isinstance(timeout_error, subprocess.TimeoutExpired)
+    assert isinstance(timeout_error.output, str)
+    assert isinstance(timeout_error.stderr, str)
+    assert timeout_error.output == "ready\n"
+    assert timeout_error.stderr == "waiting\n"
 
 
 @pytest.mark.asyncio
-async def test_command_runner_maps_called_process_error_to_paper_error(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_command_runner_cancellation_terminates_child(
+    tmp_path: Path,
 ) -> None:
-    def bad_paper(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise subprocess.CalledProcessError(
-            returncode=1,
-            cmd=["pandoc", "input.html"],
-            stderr="converter exited 1",
+    pid_file = tmp_path / "cancel.pid"
+    child = _sleeping_child_script(pid_file)
+    task = asyncio.create_task(CommandRunner().run([sys.executable, "-c", child], timeout=5))
+
+    pid = int((await _wait_for_file(pid_file)).strip())
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await _assert_process_gone(pid)
+
+
+@pytest.mark.asyncio
+async def test_command_runner_maps_called_process_error_to_paper_error() -> None:
+    with pytest.raises(PaperError, match="converter exited 1") as exc_info:
+        await CommandRunner().run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "print('partial output'); "
+                    "print('converter exited 1', file=sys.stderr); "
+                    "raise SystemExit(1)"
+                ),
+            ],
+            timeout=5,
         )
 
-    monkeypatch.setattr(subprocess, "run", bad_paper)
-
-    with pytest.raises(PaperError, match="converter exited 1"):
-        await CommandRunner().run(["pandoc", "input.html"], timeout=5)
+    process_error = exc_info.value.__cause__
+    assert isinstance(process_error, subprocess.CalledProcessError)
+    assert isinstance(process_error.output, str)
+    assert isinstance(process_error.stderr, str)
+    assert process_error.output == "partial output\n"
+    assert process_error.stderr == "converter exited 1\n"
 
 
 @pytest.mark.asyncio
@@ -581,3 +611,37 @@ def _write_converter_output(argv: Sequence[str], input_path: Path) -> None:
         f"# converted {input_path.suffix}\n",
         encoding="utf-8",
     )
+
+
+def _sleeping_child_script(pid_file: Path) -> str:
+    return (
+        "from pathlib import Path; "
+        "import os, sys, time; "
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
+        "print('ready', flush=True); "
+        "print('waiting', file=sys.stderr, flush=True); "
+        "time.sleep(30)"
+    )
+
+
+async def _wait_for_file(path: Path, *, timeout: float = 5.0) -> str:
+    async with asyncio.timeout(timeout):
+        while not path.exists():
+            await asyncio.sleep(0.01)
+    return path.read_text(encoding="utf-8")
+
+
+async def _assert_process_gone(pid: int, *, timeout: float = 5.0) -> None:
+    async with asyncio.timeout(timeout):
+        while _is_process_alive(pid):
+            await asyncio.sleep(0.01)
+
+
+def _is_process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True

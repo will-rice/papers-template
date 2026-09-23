@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import locale
 import shutil
 import subprocess
 from collections.abc import Awaitable, Callable, Sequence
@@ -20,6 +21,7 @@ from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
 
 _CONVERSION_TIMEOUT = 900.0
+_PROCESS_SHUTDOWN_TIMEOUT = 2.0
 _MARKER_TOOL = "marker_single"
 _PANDOC_TOOL = "pandoc"
 
@@ -29,22 +31,99 @@ class CommandRunner:
         self, argv: Sequence[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
         try:
-            return await asyncio.to_thread(
-                subprocess.run,
-                argv,
-                text=True,
-                capture_output=True,
-                check=True,
-                timeout=timeout,
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError as error:
             raise InfrastructureError(f"missing conversion tool: {argv[0]}") from error
-        except subprocess.TimeoutExpired as error:
+
+        stdout_task = asyncio.create_task(_read_stream(process.stdout))
+        stderr_task = asyncio.create_task(_read_stream(process.stderr))
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            stdout, stderr = await _terminate_process(
+                process,
+                stdout_task=stdout_task,
+                stderr_task=stderr_task,
+            )
             raise InfrastructureError(
                 f"conversion infrastructure timeout: {argv[0]}"
-            ) from error
-        except subprocess.CalledProcessError as error:
-            raise PaperError(error.stderr.strip() or f"{argv[0]} failed") from error
+            ) from subprocess.TimeoutExpired(
+                cmd=list(argv),
+                timeout=timeout,
+                output=stdout,
+                stderr=stderr,
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                _terminate_process(
+                    process,
+                    stdout_task=stdout_task,
+                    stderr_task=stderr_task,
+                )
+            )
+            raise
+
+        stdout = _decode_output(await stdout_task)
+        stderr = _decode_output(await stderr_task)
+        assert process.returncode is not None
+        completed = subprocess.CompletedProcess(
+            args=list(argv),
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        if completed.returncode != 0:
+            raise PaperError(completed.stderr.strip() or f"{argv[0]} failed") from (
+                subprocess.CalledProcessError(
+                    returncode=completed.returncode,
+                    cmd=completed.args,
+                    output=completed.stdout,
+                    stderr=completed.stderr,
+                )
+            )
+        return completed
+
+
+async def _read_stream(stream: asyncio.StreamReader | None) -> bytes:
+    if stream is None:
+        return b""
+    return await stream.read()
+
+
+async def _terminate_process(
+    process: asyncio.subprocess.Process,
+    *,
+    stdout_task: asyncio.Task[bytes],
+    stderr_task: asyncio.Task[bytes],
+) -> tuple[str, str]:
+    if process.returncode is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+
+    stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+    return _decode_output(stdout), _decode_output(stderr)
+
+
+def _decode_output(data: bytes) -> str:
+    return data.decode(locale.getpreferredencoding(False), errors="replace")
 
 
 @dataclass(frozen=True)
