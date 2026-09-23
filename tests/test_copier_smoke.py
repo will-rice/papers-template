@@ -23,13 +23,15 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     assert (destination / "pyproject.toml").is_file()
     assert (destination / "src/papers_pipeline/__init__.py").is_file()
     assert (destination / "src/papers_pipeline/cli.py").is_file()
+    assert (destination / "papers.yml").is_file()
+    assert (destination / "papers.schema.json").is_file()
     env = os.environ.copy()
     env["PYTHONPATH"] = str(destination / "src")
     completed = subprocess.run(
         [
             sys.executable,
             "-c",
-            "from papers_pipeline.cli import app; raise SystemExit(app())",
+            "from papers_pipeline.cli import app; raise SystemExit(app(['validate', '--config', 'papers.yml']))",
         ],
         cwd=destination,
         env=env,
@@ -38,6 +40,7 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
         text=True,
     )
     assert completed.returncode == 0
+    assert completed.stdout == "valid: papers.yml\n"
     answers = (destination / ".copier-answers.yml").read_text()
     assert "_src_path:" in answers
     assert "template_version: 0.1.0" in answers

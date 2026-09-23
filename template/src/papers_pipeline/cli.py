@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import argparse
+import os
+from pathlib import Path
+from typing import Sequence
 
-def app() -> int:
+from papers_pipeline.config import load_config
+
+
+def app(argv: Sequence[str] | None = None) -> int:
     """Run the pipeline CLI."""
 
+    parser = argparse.ArgumentParser(prog="papers-pipeline")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    validate = subparsers.add_parser("validate")
+    validate.add_argument("--config", type=Path, default=Path("papers.yml"))
+
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.command == "validate":
+        load_config(args.config, os.environ)
+        print(f"valid: {args.config}")
     return 0
 
 
