@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from papers_pipeline.adapters.base import Adapter, FetchPage
-from papers_pipeline.config import PipelineConfig
+from papers_pipeline.config import AdapterConfig, PipelineConfig
+from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.models import PipelineState, SourceRecord
 
@@ -39,6 +40,19 @@ def _page_error_events(source: str, page: FetchPage) -> tuple[str, ...]:
     )
 
 
+def _page_config(
+    config: PipelineConfig, adapter_index: int, remaining: int
+) -> AdapterConfig:
+    adapter_config = config.adapters[adapter_index]
+    return type(adapter_config).model_validate(
+        {
+            **adapter_config.model_dump(),
+            "page_size": min(adapter_config.page_size, remaining),
+            "max_results": remaining,
+        }
+    )
+
+
 async def fetch_all(
     config: PipelineConfig,
     state: PipelineState,
@@ -52,7 +66,7 @@ async def fetch_all(
     events: list[str] = []
     cursors = dict(state.cursors)
 
-    for adapter_config in config.adapters:
+    for adapter_index, adapter_config in enumerate(config.adapters):
         if not adapter_config.enabled:
             continue
 
@@ -72,14 +86,23 @@ async def fetch_all(
 
         async with client_factory(deadline) as client:
             while pages_fetched < adapter_config.max_pages:
-                page = await adapter.fetch(window, cursor, client, adapter_config)
+                remaining = adapter_config.max_results - len(source_records)
+                page = await adapter.fetch(
+                    window,
+                    cursor,
+                    client,
+                    _page_config(config, adapter_index, remaining),
+                )
                 pages_fetched += 1
                 source_error_events.extend(_page_error_events(adapter.name, page))
                 source_errors += len(page.permanent_errors)
 
-                remaining = adapter_config.max_results - len(source_records)
-                if remaining > 0:
-                    source_records.extend(page.records[:remaining])
+                if len(page.records) > remaining:
+                    raise InfrastructureError(
+                        f"{adapter.name} returned {len(page.records)} records with only "
+                        f"{remaining} results remaining"
+                    )
+                source_records.extend(page.records)
 
                 cursor = page.next_cursor
                 if cursor is None:

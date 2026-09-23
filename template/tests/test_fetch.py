@@ -132,6 +132,7 @@ def adapter_config(
     name: str,
     *,
     lookback_days: int,
+    page_size: int = 2,
     max_pages: int = 10,
     max_results: int = 10,
     enabled: bool = True,
@@ -140,7 +141,7 @@ def adapter_config(
         name=name,  # type: ignore[arg-type]
         enabled=enabled,
         lookback_days=lookback_days,
-        page_size=2,
+        page_size=page_size,
         max_pages=max_pages,
         max_results=max_results,
         filters={},
@@ -243,6 +244,87 @@ async def test_fetch_persists_cursor_and_marks_result_cap_without_completing() -
     assert result.stats[0].capped is True
     assert result.stats[0].complete is False
     assert result.events == ("arxiv: cap reached; continuation persisted",)
+
+
+@pytest.mark.asyncio
+async def test_fetch_raises_when_adapter_returns_more_records_than_remaining_budget() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7, max_results=3, page_size=2))
+    adapter = RecordingAdapter(
+        "arxiv",
+        pages=[
+            FetchPage(
+                records=(
+                    source_record("arxiv", "2401.00001"),
+                    source_record("arxiv", "2401.00002"),
+                ),
+                next_cursor="opaque-mid",
+                capped=False,
+                permanent_errors=(),
+            ),
+            FetchPage(
+                records=(
+                    source_record("arxiv", "2401.00003"),
+                    source_record("arxiv", "2401.00004"),
+                ),
+                next_cursor="opaque-skip",
+                capped=False,
+                permanent_errors=(),
+            ),
+        ],
+    )
+    factory, clients, _ = client_factory(config.fetch)
+
+    with pytest.raises(
+        InfrastructureError,
+        match="arxiv returned 2 records with only 1 results remaining",
+    ):
+        await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
+
+    assert adapter.cursors == [None, "opaque-mid"]
+    assert len(adapter.pages) == 0
+    assert clients[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_passes_remaining_budget_to_adapter_and_preserves_page_two_continuation() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7, max_results=3, page_size=2))
+    adapter = RecordingAdapter(
+        "arxiv",
+        pages=[
+            FetchPage(
+                records=(
+                    source_record("arxiv", "2401.00001"),
+                    source_record("arxiv", "2401.00002"),
+                ),
+                next_cursor="opaque-mid",
+                capped=False,
+                permanent_errors=(),
+            ),
+            FetchPage(
+                records=(source_record("arxiv", "2401.00003"),),
+                next_cursor="opaque-tail",
+                capped=True,
+                permanent_errors=(),
+            ),
+        ],
+    )
+    factory, clients, _ = client_factory(config.fetch)
+
+    result = await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
+
+    assert [(cfg.page_size, cfg.max_results) for cfg in adapter.configs] == [(2, 3), (1, 1)]
+    assert tuple(record.source_id for record in result.records) == (
+        "2401.00001",
+        "2401.00002",
+        "2401.00003",
+    )
+    assert len({record.source_id for record in result.records}) == 3
+    assert result.state.cursors == {"arxiv": "opaque-tail"}
+    assert result.stats[0].fetched == 3
+    assert result.stats[0].capped is True
+    assert result.stats[0].complete is False
+    assert result.events == ("arxiv: cap reached; continuation persisted",)
+    assert clients[0].closed is True
 
 
 @pytest.mark.asyncio
