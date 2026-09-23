@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import hashlib
+import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+import httpx
 
 from papers_pipeline.batching import Batch, expected_markdown
 from papers_pipeline.config import ConcurrencyConfig
 from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
+
+_CONVERSION_TIMEOUT = 900.0
+_MARKER_TOOL = "marker_single"
+_PANDOC_TOOL = "pandoc"
 
 
 class CommandRunner:
@@ -38,6 +48,47 @@ class CommandRunner:
 
 
 @dataclass(frozen=True)
+class MaterializedInput:
+    local_path: Path
+    cleanup_paths: tuple[Path, ...] = ()
+
+
+class DownloadingMaterializer:
+    def __init__(
+        self,
+        downloader: Callable[[str, float], Awaitable[bytes]] | None = None,
+    ) -> None:
+        self._downloader = downloader or _download_bytes
+
+    async def materialize(self, paper: Paper, root: Path) -> MaterializedInput:
+        parts = urlsplit(paper.input_url)
+        if parts.scheme in {"", "file"}:
+            local_path = Path(parts.path)
+            if not local_path.exists():
+                raise InfrastructureError(f"conversion input missing: {paper.input_url}")
+            return MaterializedInput(local_path=local_path)
+        if parts.scheme not in {"http", "https"}:
+            raise InfrastructureError(
+                f"unsupported conversion input URL: {paper.input_url}"
+            )
+
+        suffix = Path(parts.path).suffix or _default_suffix(paper)
+        target = root / "inputs" / f"{_materialized_name(paper, paper.input_url)}{suffix}"
+        payload = await self._downloader(paper.input_url, _CONVERSION_TIMEOUT)
+        try:
+            _atomic_write_bytes(target, payload)
+        except OSError as error:
+            raise InfrastructureError(
+                f"conversion input cache write failed: {paper.input_url}"
+            ) from error
+        return MaterializedInput(local_path=target, cleanup_paths=(target,))
+
+
+class InputMaterializer(Protocol):
+    async def materialize(self, paper: Paper, root: Path) -> MaterializedInput: ...
+
+
+@dataclass(frozen=True)
 class PaperConversion:
     paper: Paper
     output: Path | None
@@ -52,10 +103,17 @@ class ConversionResult:
     state: PipelineState
 
 
-def command_for(paper: Paper, output: Path) -> list[str]:
+@dataclass(frozen=True)
+class _PreparedConversion:
+    paper: Paper
+    staged_output: Path | None
+    error: str | None
+
+
+def command_for(paper: Paper, input_path: Path, output: Path) -> list[str]:
     if paper.input_format in {"html", "latex"}:
-        return ["pandoc", paper.input_url, "--to=gfm", f"--output={output}"]
-    return ["marker_single", paper.input_url, "--output_dir", str(output.parent)]
+        return [_PANDOC_TOOL, str(input_path), "--to=gfm", f"--output={output}"]
+    return [_MARKER_TOOL, str(input_path), "--output_dir", str(output)]
 
 
 async def convert_batch(
@@ -64,76 +122,187 @@ async def convert_batch(
     state: PipelineState,
     concurrency: ConcurrencyConfig,
     runner: CommandRunner,
+    materializer: InputMaterializer | None,
     now: datetime,
 ) -> ConversionResult:
     if concurrency.pdf != 1:
         raise InfrastructureError("PDF concurrency must equal 1")
 
+    materializer = materializer or DownloadingMaterializer()
+    workspace = _batch_workspace(root)
     semaphores = {
         "html": asyncio.Semaphore(concurrency.html),
         "latex": asyncio.Semaphore(concurrency.latex),
         "pdf": asyncio.Semaphore(1),
     }
 
-    async def convert_one(paper: Paper) -> PaperConversion:
-        output = expected_markdown(root, paper)
-        output.parent.mkdir(parents=True, exist_ok=True)
+    async def convert_one(paper: Paper) -> _PreparedConversion:
+        materialized: MaterializedInput | None = None
         try:
+            materialized = await materializer.materialize(paper, workspace)
+            staged_output = _staged_output_path(workspace, paper)
             async with semaphores[paper.input_format]:
-                await runner.run(command_for(paper, output), timeout=900)
-            if not output.exists():
+                if paper.input_format in {"html", "latex"}:
+                    await runner.run(
+                        command_for(paper, materialized.local_path, staged_output),
+                        timeout=_CONVERSION_TIMEOUT,
+                    )
+                else:
+                    marker_output_dir = _marker_output_dir(workspace, paper)
+                    await runner.run(
+                        command_for(paper, materialized.local_path, marker_output_dir),
+                        timeout=_CONVERSION_TIMEOUT,
+                    )
+                    produced_markdown = _marker_markdown_path(
+                        marker_output_dir, materialized.local_path
+                    )
+                    if not produced_markdown.exists():
+                        raise InfrastructureError(
+                            f"converter reported success without output: {paper.identifier}"
+                        )
+                    _atomic_move(produced_markdown, staged_output)
+
+            if not staged_output.exists():
                 raise InfrastructureError(
                     f"converter reported success without output: {paper.identifier}"
                 )
-            return PaperConversion(paper=paper, output=output, error=None)
+            return _PreparedConversion(paper=paper, staged_output=staged_output, error=None)
         except PaperError as error:
-            return PaperConversion(paper=paper, output=None, error=str(error))
+            return _PreparedConversion(paper=paper, staged_output=None, error=str(error))
+        finally:
+            if materialized is not None:
+                _cleanup_paths(materialized.cleanup_paths)
 
-    raw_results = await asyncio.gather(
-        *(convert_one(paper) for paper in batch.papers),
-        return_exceptions=True,
-    )
+    tasks = [asyncio.create_task(convert_one(paper)) for paper in batch.papers]
+    results: list[_PreparedConversion] = []
 
-    for raw_result in raw_results:
-        if isinstance(raw_result, InfrastructureError):
-            raise raw_result
-        if isinstance(raw_result, BaseException):
-            raise InfrastructureError("unexpected converter task failure") from raw_result
+    try:
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                try:
+                    results.append(task.result())
+                except InfrastructureError:
+                    await _cancel_pending(pending)
+                    raise
+                except BaseException as error:
+                    await _cancel_pending(pending)
+                    raise InfrastructureError(
+                        "unexpected converter task failure"
+                    ) from error
 
-    results = tuple(result for result in raw_results if isinstance(result, PaperConversion))
+        succeeded = _promote_successes(results, root)
+        failures = {identifier: list(attempts) for identifier, attempts in state.failures.items()}
+        failed: list[PaperConversion] = []
+        promoted: list[Path] = []
 
-    failures = {identifier: list(attempts) for identifier, attempts in state.failures.items()}
-    promoted: list[Path] = []
-    for result in results:
-        identifier = result.paper.identifier
-        if result.error is None:
-            failures.pop(identifier, None)
-            continue
+        for result in results:
+            if result.error is None:
+                failures.pop(result.paper.identifier, None)
+                continue
 
-        attempts = [
-            *failures.get(identifier, []),
-            FailureAttempt(occurred_at=now, error=result.error),
-        ][-3:]
-        if len(attempts) < 3:
-            failures[identifier] = attempts
-            continue
+            failed.append(PaperConversion(paper=result.paper, output=None, error=result.error))
+            attempts = [
+                *failures.get(result.paper.identifier, []),
+                FailureAttempt(occurred_at=now, error=result.error),
+            ][-3:]
+            if len(attempts) < 3:
+                failures[result.paper.identifier] = attempts
+                continue
 
-        marker = expected_markdown(root, result.paper).with_suffix(".fixme.txt")
-        _write_fixme(
-            marker,
-            identifier=identifier,
-            latest_error=result.error,
-            attempts=attempts,
+            marker = expected_markdown(root, result.paper).with_suffix(".fixme.txt")
+            _write_fixme(
+                marker,
+                identifier=result.paper.identifier,
+                latest_error=result.error,
+                attempts=attempts,
+            )
+            promoted.append(marker)
+            failures.pop(result.paper.identifier, None)
+
+        return ConversionResult(
+            succeeded=succeeded,
+            failed=tuple(failed),
+            promoted=tuple(promoted),
+            state=state.model_copy(update={"failures": failures}),
         )
-        promoted.append(marker)
-        failures.pop(identifier, None)
+    finally:
+        _cleanup_workspace(workspace)
 
-    return ConversionResult(
-        succeeded=tuple(result for result in results if result.error is None),
-        failed=tuple(result for result in results if result.error is not None),
-        promoted=tuple(promoted),
-        state=state.model_copy(update={"failures": failures}),
-    )
+
+async def _download_bytes(url: str, timeout: float) -> bytes:
+    try:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            response = await client.get(url, timeout=timeout)
+    except httpx.TimeoutException as error:
+        raise InfrastructureError(f"conversion input timeout: {url}") from error
+    except httpx.NetworkError as error:
+        raise InfrastructureError(f"conversion input network failure: {url}") from error
+    except httpx.RequestError as error:
+        raise InfrastructureError(f"conversion input request failed: {url}") from error
+
+    if response.status_code in {401, 403}:
+        raise InfrastructureError(f"conversion input authentication failed: {url}")
+    if 300 <= response.status_code < 400:
+        raise InfrastructureError(
+            f"conversion input redirect HTTP {response.status_code}: {url}"
+        )
+    if response.is_error:
+        raise InfrastructureError(f"conversion input HTTP {response.status_code}: {url}")
+    return response.content
+
+
+def _materialized_name(paper: Paper, input_url: str) -> str:
+    digest = hashlib.sha256(input_url.encode("utf-8")).hexdigest()[:12]
+    slug = "".join(
+        character if character.isalnum() else "-"
+        for character in paper.identifier.casefold()
+    ).strip("-")
+    trimmed = "-".join(part for part in slug.split("-") if part)[:48] or "paper"
+    return f"{trimmed}--{digest}"
+
+
+def _default_suffix(paper: Paper) -> str:
+    return {"html": ".html", "latex": ".tex", "pdf": ".pdf"}[paper.input_format]
+
+
+def _batch_workspace(root: Path) -> Path:
+    workspace = root / ".convert-batch" / uuid4().hex[:12]
+    workspace.mkdir(parents=True, exist_ok=False)
+    return workspace
+
+
+def _staged_output_path(workspace: Path, paper: Paper) -> Path:
+    path = workspace / "outputs" / expected_markdown(workspace, paper).name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _marker_output_dir(workspace: Path, paper: Paper) -> Path:
+    path = workspace / "marker" / expected_markdown(workspace, paper).stem
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _marker_markdown_path(output_dir: Path, input_path: Path) -> Path:
+    return output_dir / input_path.stem / f"{input_path.stem}.md"
+
+
+def _promote_successes(
+    results: Sequence[_PreparedConversion], root: Path
+) -> tuple[PaperConversion, ...]:
+    succeeded: list[PaperConversion] = []
+    for result in results:
+        if result.error is not None or result.staged_output is None:
+            continue
+        output = expected_markdown(root, result.paper)
+        _atomic_move(result.staged_output, output)
+        succeeded.append(PaperConversion(paper=result.paper, output=output, error=None))
+    return tuple(succeeded)
 
 
 def _write_fixme(
@@ -143,9 +312,8 @@ def _write_fixme(
     latest_error: str,
     attempts: list[FailureAttempt],
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(
+    _atomic_write_text(
+        path,
         "\n".join(
             [
                 f"paper: {identifier}",
@@ -157,6 +325,46 @@ def _write_fixme(
             ]
         )
         + "\n",
-        encoding="utf-8",
     )
-    os.replace(temporary, path)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_bytes(content)
+    temporary.replace(path)
+
+
+def _atomic_move(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(destination)
+
+
+def _cleanup_paths(paths: Sequence[Path]) -> None:
+    for path in sorted(paths, key=lambda item: len(item.parts), reverse=True):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+
+
+async def _cancel_pending(tasks: set[asyncio.Task[_PreparedConversion]]) -> None:
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _cleanup_workspace(workspace: Path) -> None:
+    shutil.rmtree(workspace, ignore_errors=True)
+    try:
+        workspace.parent.rmdir()
+    except OSError:
+        pass
