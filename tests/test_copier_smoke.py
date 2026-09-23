@@ -18,6 +18,7 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
             "topic_description": 'sample "topic": demo',
             "template_version": "0.1.0",
         },
+        vcs_ref="HEAD",
         defaults=True,
         unsafe=True,
     )
@@ -87,3 +88,29 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     answers = (destination / ".copier-answers.yml").read_text()
     assert "_src_path:" in answers
     assert "template_version: 0.1.0" in answers
+
+
+def test_template_renders_protected_state_files(tmp_path: Path) -> None:
+    destination = tmp_path / "sample-papers"
+    run_copy(
+        ".",
+        destination,
+        data={
+            "project_name": "Sample Papers",
+            "project_slug": "sample-papers",
+            "topic_description": "sample topic",
+            "template_version": "0.1.0",
+        },
+        vcs_ref="HEAD",
+        defaults=True,
+        unsafe=True,
+    )
+
+    papers_csv = destination / "papers.csv"
+    state_file = destination / ".papers-state.yml"
+    assert papers_csv.is_file()
+    assert state_file.is_file()
+    assert papers_csv.read_text() == (
+        "identifier,title,abstract,authors,published,url,source,input_format,input_url,categories,doi,arxiv_id\n"
+    )
+    assert state_file.read_text() == "cursors: {}\nfailures: {}\n"
