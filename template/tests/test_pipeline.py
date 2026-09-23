@@ -249,6 +249,78 @@ async def test_inventory_commit_failure_restores_inventory_and_state(
 
 
 @pytest.mark.asyncio
+async def test_completed_inventory_commit_is_not_rolled_back_or_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = make_paths(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    real_check_output = subprocess.check_output
+    rev_parse_calls = 0
+
+    def hide_new_head(*args: Any, **kwargs: Any) -> Any:
+        nonlocal rev_parse_calls
+        command = args[0]
+        if command[:3] == ["git", "rev-parse", "--verify"]:
+            rev_parse_calls += 1
+            if rev_parse_calls == 2:
+                raise subprocess.CalledProcessError(128, command)
+        if command[:4] == ["git", "log", "-1", "--format=%H"]:
+            raise subprocess.CalledProcessError(128, command)
+        return real_check_output(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", hide_new_head)
+    with pytest.raises(InfrastructureError, match="commit completed"):
+        await run_nightly(
+            paths,
+            dependencies(
+                FakeAdapter([record("one")]),
+                FakeRunner(),
+                GitRepository(tmp_path),
+            ),
+        )
+    monkeypatch.setattr(subprocess, "check_output", real_check_output)
+
+    assert paths.inventory.exists()
+    assert real_check_output(
+        [
+            "git",
+            "status",
+            "--short",
+            "--",
+            paths.inventory.name,
+            paths.state.name,
+        ],
+        cwd=tmp_path,
+        text=True,
+    ).strip() == ""
+
+    await run_nightly(
+        paths,
+        dependencies(
+            FakeAdapter([record("one")]),
+            FakeRunner(),
+            GitRepository(tmp_path),
+        ),
+    )
+
+    subjects = real_check_output(
+        ["git", "log", "--format=%s"],
+        cwd=tmp_path,
+        text=True,
+    ).splitlines()
+    assert subjects.count("chore: update paper inventory") == 1
+
+
+@pytest.mark.asyncio
 async def test_formatter_failure_restores_batch_outputs_state_and_index(
     tmp_path: Path,
 ) -> None:
@@ -492,6 +564,59 @@ def test_git_repository_commits_only_exact_changed_paths_and_deletions(
         cwd=tmp_path,
         text=True,
     ).strip() == "M unrelated.txt"
+
+
+def test_git_repository_recovers_sha_after_post_commit_rev_parse_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    tracked.write_text("updated\n", encoding="utf-8")
+    real_check_output = subprocess.check_output
+    rev_parse_calls = 0
+
+    def fail_post_commit_rev_parse(*args: Any, **kwargs: Any) -> Any:
+        nonlocal rev_parse_calls
+        command = args[0]
+        if command[:3] == ["git", "rev-parse", "--verify"]:
+            rev_parse_calls += 1
+            if rev_parse_calls == 2:
+                raise subprocess.CalledProcessError(128, command)
+        return real_check_output(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", fail_post_commit_rev_parse)
+    repository = GitRepository(tmp_path)
+
+    commit = repository.commit([tracked], "update tracked")
+    duplicate = repository.commit([tracked], "duplicate retry")
+
+    assert rev_parse_calls >= 2
+    assert commit == real_check_output(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=tmp_path,
+        text=True,
+    ).strip()
+    assert duplicate is None
+    assert real_check_output(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=tmp_path,
+        text=True,
+    ).strip() == "2"
+    assert real_check_output(
+        ["git", "status", "--short"],
+        cwd=tmp_path,
+        text=True,
+    ).strip() == ""
 
 
 def test_git_repository_rejects_dirty_relevant_paths_but_allows_unrelated_changes(

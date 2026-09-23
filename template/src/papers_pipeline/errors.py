@@ -13,5 +13,9 @@ class InfrastructureError(PipelineError):
     """Shared infrastructure cannot safely continue."""
 
 
+class CommitCompletedError(InfrastructureError):
+    """Git committed the transaction, but its resulting SHA was unavailable."""
+
+
 class PaperError(PipelineError):
     """One paper failed without invalidating unrelated work."""

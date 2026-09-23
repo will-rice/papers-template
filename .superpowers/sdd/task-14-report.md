@@ -68,3 +68,26 @@ unstaged paths, and duplicate cap events. After implementation:
 - Ruff: `All checks passed!`
 - Mypy strict: `Success: no issues found in 26 source files`.
 - `git diff --check`: clean.
+
+## Commit-point hardening
+
+- `GitRepository.commit` now resolves the old HEAD before committing, validates
+  that HEAD advanced afterward, and falls back to `git log` when the primary
+  post-commit `rev-parse` fails.
+- If both post-commit SHA lookups fail, `CommitCompletedError` records that the
+  commit command succeeded. Inventory and batch transactions propagate this
+  committed-state error without restoring files or clearing staging, preventing
+  reverse-dirty worktrees and duplicate commits on retry.
+- Added real-subprocess tests with injected post-commit lookup failures,
+  covering fallback SHA recovery and the unresolved committed-state retry path.
+- Removed the unrequested tracked Task 14 recovery plan.
+
+### Final verification
+
+- Focused Task 14 tests: `20 passed`.
+- Full template suite: `190 passed`.
+- Root suite: `2 passed` with only expected Copier dirty-template warnings.
+- Ruff: `All checks passed!`
+- Mypy strict (with stale third-party suppression warnings disabled):
+  `Success: no issues found in 26 source files`.
+- `git diff --check`: clean.
