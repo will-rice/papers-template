@@ -211,6 +211,53 @@ def arxiv_invalid_xml_client(
 
 
 @pytest.fixture
+def arxiv_out_of_window_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    arxiv_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _arxiv_route(
+                start=0,
+                page_size=arxiv_config.page_size,
+                search_query="cat%3Acs.CL",
+            ): {
+                "fixture": "adapters/arxiv/page-out-of-window-only.xml",
+            },
+            _arxiv_route(
+                start=1,
+                page_size=arxiv_config.page_size,
+                search_query="cat%3Acs.CL",
+            ): {
+                "fixture": "adapters/arxiv/page-2.xml",
+            },
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def arxiv_malformed_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    arxiv_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _arxiv_route(
+                start=0,
+                page_size=arxiv_config.page_size,
+                search_query="cat%3Acs.CL",
+            ): {
+                "fixture": "adapters/arxiv/page-malformed-only.xml",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
 def huggingface_config() -> AdapterConfig:
     return AdapterConfig(
         name="huggingface",
@@ -283,6 +330,53 @@ def huggingface_invalid_json_client(
                 date="2024-01-08",
             ): {
                 "fixture": "adapters/huggingface/page-invalid.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def huggingface_out_of_window_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    huggingface_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _huggingface_route(
+                page=0,
+                page_size=huggingface_config.page_size,
+                date="2024-01-08",
+            ): {
+                "fixture": "adapters/huggingface/page-out-of-window-only.json",
+            },
+            _huggingface_route(
+                page=1,
+                page_size=huggingface_config.page_size,
+                date="2024-01-08",
+            ): {
+                "fixture": "adapters/huggingface/page-2.json",
+            },
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def huggingface_malformed_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    huggingface_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _huggingface_route(
+                page=0,
+                page_size=huggingface_config.page_size,
+                date="2024-01-08",
+            ): {
+                "fixture": "adapters/huggingface/page-malformed-only.json",
             }
         }
     )

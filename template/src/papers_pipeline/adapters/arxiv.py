@@ -57,14 +57,14 @@ class ArxivAdapter:
             )
 
         next_state = {
-            "emitted": state["emitted"] + len(records),
+            "consumed": state["consumed"] + len(entries),
             "page": state["page"] + 1,
             "start": state["start"] + len(entries),
         }
         next_cursor = _encode_cursor(next_state)
         capped = (
             next_state["page"] >= config.max_pages
-            or next_state["emitted"] >= config.max_results
+            or next_state["consumed"] >= config.max_results
         )
         return FetchPage(
             records=records,
@@ -122,7 +122,7 @@ def _encode_cursor(state: dict[str, int]) -> str:
 
 def _decode_cursor(cursor: str | None) -> dict[str, int]:
     if cursor is None:
-        return {"emitted": 0, "page": 0, "start": 0}
+        return {"consumed": 0, "page": 0, "start": 0}
     padding = "=" * (-len(cursor) % 4)
     try:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
@@ -131,19 +131,21 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
         raise InfrastructureError(f"invalid arxiv continuation cursor: {cursor}") from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid arxiv continuation cursor: {cursor}")
-    emitted = data.get("emitted")
+    consumed = data.get("consumed")
     page = data.get("page")
     start = data.get("start")
+    if consumed is None and isinstance(start, int):
+        consumed = start
     if (
-        not isinstance(emitted, int)
-        or emitted < 0
+        not isinstance(consumed, int)
+        or consumed < 0
         or not isinstance(page, int)
         or page < 0
         or not isinstance(start, int)
         or start < 0
     ):
         raise InfrastructureError(f"invalid arxiv continuation cursor: {cursor}")
-    return {"emitted": emitted, "page": page, "start": start}
+    return {"consumed": consumed, "page": page, "start": start}
 
 
 def _required_identifier(entry: ElementTree.Element) -> str:

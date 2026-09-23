@@ -151,6 +151,60 @@ async def test_huggingface_keeps_valid_records_and_surfaces_malformed_entries(
 
 
 @pytest.mark.asyncio
+async def test_huggingface_all_out_of_window_page_preserves_progress_for_continuation(
+    huggingface_out_of_window_only_client: RequestClient, huggingface_config: AdapterConfig
+) -> None:
+    adapter = HuggingFaceAdapter()
+    first_page = await adapter.fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=None,
+        client=huggingface_out_of_window_only_client,
+        config=huggingface_config,
+    )
+
+    second_page = await adapter.fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=first_page.next_cursor,
+        client=huggingface_out_of_window_only_client,
+        config=huggingface_config,
+    )
+
+    assert first_page.records == ()
+    assert first_page.next_cursor
+    assert first_page.capped is False
+    assert first_page.permanent_errors == ()
+    assert tuple(record.source_id for record in second_page.records) == ("2401.00002",)
+
+
+@pytest.mark.asyncio
+async def test_huggingface_malformed_only_page_counts_toward_max_results(
+    huggingface_malformed_only_client: RequestClient, huggingface_config: AdapterConfig
+) -> None:
+    page = await HuggingFaceAdapter().fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=None,
+        client=huggingface_malformed_only_client,
+        config=huggingface_config.model_copy(update={"max_pages": 10, "max_results": 1}),
+    )
+
+    assert page.records == ()
+    assert page.next_cursor
+    assert page.capped is True
+    assert page.permanent_errors == (
+        "huggingface record missing publishedAt: 2401.99998",
+    )
+
+
+@pytest.mark.asyncio
 async def test_huggingface_invalid_json_page_is_infrastructure_failure(
     huggingface_invalid_json_client: RequestClient, huggingface_config: AdapterConfig
 ) -> None:

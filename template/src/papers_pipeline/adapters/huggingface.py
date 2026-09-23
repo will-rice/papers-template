@@ -53,11 +53,14 @@ class HuggingFaceAdapter:
                 permanent_errors=errors,
             )
 
-        next_state = {"emitted": state["emitted"] + len(records), "page": state["page"] + 1}
+        next_state = {
+            "consumed": state["consumed"] + len(payload),
+            "page": state["page"] + 1,
+        }
         next_cursor = _encode_cursor(next_state)
         capped = (
             next_state["page"] >= config.max_pages
-            or next_state["emitted"] >= config.max_results
+            or next_state["consumed"] >= config.max_results
         )
         return FetchPage(
             records=records,
@@ -101,7 +104,7 @@ def _encode_cursor(state: dict[str, int]) -> str:
 
 def _decode_cursor(cursor: str | None) -> dict[str, int]:
     if cursor is None:
-        return {"emitted": 0, "page": 0}
+        return {"consumed": 0, "page": 0}
     padding = "=" * (-len(cursor) % 4)
     try:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
@@ -110,11 +113,11 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}") from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
-    emitted = data.get("emitted")
+    consumed = data.get("consumed", data.get("emitted"))
     page = data.get("page")
-    if not isinstance(emitted, int) or emitted < 0 or not isinstance(page, int) or page < 0:
+    if not isinstance(consumed, int) or consumed < 0 or not isinstance(page, int) or page < 0:
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
-    return {"emitted": emitted, "page": page}
+    return {"consumed": consumed, "page": page}
 
 
 def _required_identifier(paper: dict[str, object]) -> str:
