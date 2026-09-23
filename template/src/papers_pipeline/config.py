@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+import yaml  # type: ignore[import-untyped]
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from papers_pipeline.errors import ConfigError
 
@@ -28,6 +36,18 @@ _FIELD_MESSAGES: dict[tuple[str, ...], str] = {
     ): "fetch.total_deadline_seconds must be between 60 and 7200",
 }
 
+_TOPIC_PLUGIN_PATTERN = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
+)
+_ALLOWED_FILTER_KEYS: dict[AdapterName, frozenset[str]] = {
+    "arxiv": frozenset({"search_query"}),
+    "huggingface": frozenset(),
+    "semantic_scholar": frozenset({"query"}),
+    "dblp": frozenset({"query"}),
+    "biorxiv_crossref": frozenset({"provider"}),
+    "papers_with_code": frozenset(),
+}
+
 
 class StrictModel(BaseModel):
     """Base model that rejects unknown fields."""
@@ -45,7 +65,21 @@ class AdapterConfig(StrictModel):
     page_size: int = Field(ge=1, le=1000)
     max_pages: int = Field(ge=1, le=100)
     max_results: int = Field(ge=1, le=10000)
-    filters: dict[str, str | list[str]] = Field(default_factory=dict)
+    filters: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_filters(self) -> "AdapterConfig":
+        allowed_keys = _ALLOWED_FILTER_KEYS[self.name]
+        unsupported_keys = sorted(set(self.filters) - allowed_keys)
+        if unsupported_keys:
+            raise ValueError(_unsupported_filter_message(self.name, allowed_keys))
+        if self.name == "biorxiv_crossref":
+            provider = self.filters.get("provider")
+            if provider is not None and provider not in {"biorxiv", "crossref"}:
+                raise ValueError(
+                    "biorxiv_crossref.filters.provider must be biorxiv or crossref"
+                )
+        return self
 
 
 class TopicConfig(StrictModel):
@@ -56,6 +90,13 @@ class TopicConfig(StrictModel):
     exclude_any: list[str] = Field(default_factory=list)
     categories: list[str] = Field(default_factory=list)
     plugin: str | None = None
+
+    @field_validator("plugin")
+    @classmethod
+    def validate_plugin(cls, value: str | None) -> str | None:
+        if value is None or _TOPIC_PLUGIN_PATTERN.match(value):
+            return value
+        raise ValueError("topic.plugin must use module:function format")
 
 
 class FetchConfig(StrictModel):
@@ -112,13 +153,26 @@ class PipelineConfig(StrictModel):
         return self
 
 
+def _unsupported_filter_message(
+    adapter_name: AdapterName, allowed_keys: frozenset[str]
+) -> str:
+    if not allowed_keys:
+        return f"{adapter_name}.filters does not support any keys"
+    supported = ", ".join(sorted(allowed_keys))
+    return f"{adapter_name}.filters only supports: {supported}"
+
+
 def _format_validation_error(error: ValidationError) -> str:
     first_issue = error.errors()[0]
     location = tuple(str(part) for part in first_issue["loc"])
     if location in _FIELD_MESSAGES:
         return _FIELD_MESSAGES[location]
     path = ".".join(location) or "config"
-    message = first_issue["msg"]
+    message = str(first_issue["msg"])
+    if message.startswith("Value error, "):
+        message = message.removeprefix("Value error, ")
+    if message.startswith("topic.plugin") or ".filters" in message:
+        return message
     return f"{path}: {message}"
 
 

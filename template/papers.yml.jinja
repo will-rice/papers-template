@@ -1,7 +1,7 @@
 repository:
-  name: "{{ project_name }}"
-  slug: "{{ project_slug }}"
-  description: "{{ topic_description }}"
+  name: {{ project_name | tojson }}
+  slug: {{ project_slug | tojson }}
+  description: {{ topic_description | tojson }}
 adapters:
   - name: arxiv
     enabled: true
@@ -12,7 +12,8 @@ adapters:
     max_results: 500
     filters: {}
 topic:
-  include_any: ["{{ topic_description }}"]
+  include_any:
+    - {{ topic_description | tojson }}
   include_all: []
   exclude_any: []
   categories: []

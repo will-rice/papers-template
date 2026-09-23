@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from copier import run_copy
+import yaml  # type: ignore[import-untyped]
 
 
 def test_template_renders_python_package(tmp_path: Path) -> None:
@@ -12,9 +13,9 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
         ".",
         destination,
         data={
-            "project_name": "Sample Papers",
+            "project_name": 'Sample "Papers": Demo',
             "project_slug": "sample-papers",
-            "topic_description": "sample topic",
+            "topic_description": 'sample "topic": demo',
             "template_version": "0.1.0",
         },
         defaults=True,
@@ -41,6 +42,48 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0
     assert completed.stdout == "valid: papers.yml\n"
+    rendered_config = yaml.safe_load((destination / "papers.yml").read_text())
+    assert rendered_config == {
+        "repository": {
+            "name": 'Sample "Papers": Demo',
+            "slug": "sample-papers",
+            "description": 'sample "topic": demo',
+        },
+        "adapters": [
+            {
+                "name": "arxiv",
+                "enabled": True,
+                "secret_env": None,
+                "lookback_days": 7,
+                "page_size": 100,
+                "max_pages": 5,
+                "max_results": 500,
+                "filters": {},
+            }
+        ],
+        "topic": {
+            "include_any": ['sample "topic": demo'],
+            "include_all": [],
+            "exclude_any": [],
+            "categories": [],
+            "plugin": None,
+        },
+        "fetch": {
+            "request_timeout_seconds": 30,
+            "retries": 3,
+            "backoff_seconds": 1,
+            "total_deadline_seconds": 900,
+        },
+        "conversion": {
+            "max_batches_per_run": 4,
+            "max_papers": 10,
+            "max_cost": 100,
+            "html_cost": 2,
+            "latex_cost": 4,
+            "pdf_cost": 20,
+        },
+        "concurrency": {"html": 4, "latex": 2, "pdf": 1},
+    }
     answers = (destination / ".copier-answers.yml").read_text()
     assert "_src_path:" in answers
     assert "template_version: 0.1.0" in answers

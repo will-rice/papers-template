@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import yaml
 
 from papers_pipeline.cli import app
 from papers_pipeline.config import ConfigError, PipelineConfig, load_config
@@ -60,36 +61,114 @@ def valid_config() -> Path:
         config_path.unlink(missing_ok=True)
 
 
+def _load_yaml(path: Path) -> dict[str, object]:
+    data = yaml.safe_load(path.read_text())
+    assert isinstance(data, dict)
+    return data
+
+
+def _write_yaml(path: Path, data: dict[str, object]) -> None:
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+
 @pytest.mark.parametrize(
-    ("replacement", "message"),
+    ("section", "field", "value", "message"),
     [
-        ("pdf: 2", "concurrency.pdf must equal 1"),
-        ("max_papers: 0", "conversion.max_papers must be between 1 and 100"),
+        ("concurrency", "pdf", 2, "concurrency.pdf must equal 1"),
+        ("conversion", "max_papers", 0, "conversion.max_papers must be between 1 and 100"),
         (
-            "total_deadline_seconds: 30",
+            "fetch",
+            "total_deadline_seconds",
+            30,
             "fetch.total_deadline_seconds must be between 60 and 7200",
         ),
     ],
 )
 def test_unsafe_limits_are_rejected(
-    valid_config: Path, replacement: str, message: str
+    valid_config: Path,
+    section: str,
+    field: str,
+    value: int,
+    message: str,
 ) -> None:
-    text = valid_config.read_text().replace("pdf: 1", replacement)
-    if replacement.startswith("max_papers"):
-        text = text.replace("max_papers: 10", replacement)
-    if replacement.startswith("total_deadline"):
-        text = text.replace("total_deadline_seconds: 900", replacement)
-    valid_config.write_text(text)
+    data = _load_yaml(valid_config)
+    config_section = data[section]
+    assert isinstance(config_section, dict)
+    config_section[field] = value
+    _write_yaml(valid_config, data)
 
     with pytest.raises(ConfigError, match=message):
         load_config(valid_config, {})
 
 
 def test_enabled_adapter_requires_declared_secret(valid_config: Path) -> None:
-    text = valid_config.read_text().replace("secret_env: null", "secret_env: S2_KEY", 1)
-    valid_config.write_text(text)
+    data = _load_yaml(valid_config)
+    adapters = data["adapters"]
+    assert isinstance(adapters, list)
+    assert isinstance(adapters[0], dict)
+    adapters[0]["secret_env"] = "S2_KEY"
+    _write_yaml(valid_config, data)
 
     with pytest.raises(ConfigError, match="missing secret S2_KEY"):
+        load_config(valid_config, {})
+
+
+@pytest.mark.parametrize("plugin", ["accept_topic", "topic_plugin", "topic-plugin:accept_topic"])
+def test_plugin_reference_must_use_module_function_format(
+    valid_config: Path, plugin: str
+) -> None:
+    data = _load_yaml(valid_config)
+    topic = data["topic"]
+    assert isinstance(topic, dict)
+    topic["plugin"] = plugin
+    _write_yaml(valid_config, data)
+
+    with pytest.raises(
+        ConfigError, match="topic.plugin must use module:function format"
+    ):
+        load_config(valid_config, {})
+
+
+@pytest.mark.parametrize(
+    ("adapter_name", "filters", "message"),
+    [
+        ("arxiv", {"query": "*"}, "arxiv.filters only supports: search_query"),
+        ("huggingface", {"query": "*"}, "huggingface.filters does not support any keys"),
+        (
+            "semantic_scholar",
+            {"search_query": "*"},
+            "semantic_scholar.filters only supports: query",
+        ),
+        ("dblp", {"search_query": "*"}, "dblp.filters only supports: query"),
+        (
+            "biorxiv_crossref",
+            {"query": "*"},
+            "biorxiv_crossref.filters only supports: provider",
+        ),
+        (
+            "biorxiv_crossref",
+            {"provider": "medrxiv"},
+            "biorxiv_crossref.filters.provider must be biorxiv or crossref",
+        ),
+        (
+            "papers_with_code",
+            {"query": "*"},
+            "papers_with_code.filters does not support any keys",
+        ),
+    ],
+)
+def test_adapter_filters_must_match_supported_keys(
+    valid_config: Path, adapter_name: str, filters: dict[str, str], message: str
+) -> None:
+    data = _load_yaml(valid_config)
+    adapters = data["adapters"]
+    assert isinstance(adapters, list)
+    assert isinstance(adapters[0], dict)
+    adapters[0]["name"] = adapter_name
+    adapters[0]["filters"] = filters
+    _write_yaml(valid_config, data)
+
+    with pytest.raises(ConfigError, match=message):
         load_config(valid_config, {})
 
 
@@ -109,3 +188,24 @@ def test_validate_command_accepts_valid_config(valid_config: Path, capsys: pytes
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out == f"valid: {valid_config}\n"
+
+
+def test_validate_command_reports_invalid_config_without_traceback(
+    valid_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = _load_yaml(valid_config)
+    concurrency = data["concurrency"]
+    assert isinstance(concurrency, dict)
+    concurrency["pdf"] = 2
+    _write_yaml(valid_config, data)
+
+    exit_code = app(["validate", "--config", str(valid_config)])
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert (
+        captured.err
+        == f"error: fix {valid_config}: concurrency.pdf must equal 1\n"
+    )
+    assert "Traceback" not in captured.err
