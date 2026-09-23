@@ -94,7 +94,9 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
         "concurrency": {"html": 4, "latex": 2, "pdf": 1},
     }
     answers = (destination / ".copier-answers.yml").read_text()
-    assert "_src_path:" in answers
+    parsed_answers = yaml.safe_load(answers)
+    assert parsed_answers["_src_path"] == "."
+    assert parsed_answers["_commit"]
     assert "template_version: 0.1.0" in answers
 
 

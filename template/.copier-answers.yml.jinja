@@ -1,5 +1,1 @@
-_src_path: "{{ _copier_conf.src_path }}"
-project_name: "{{ project_name }}"
-project_slug: "{{ project_slug }}"
-topic_description: "{{ topic_description }}"
-template_version: {{ template_version }}
+{{ _copier_answers | to_nice_yaml -}}

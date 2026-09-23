@@ -56,6 +56,7 @@ def test_actions_are_sha_pinned_and_jobs_and_steps_have_timeouts() -> None:
         "ci.yml",
         "format-corpus.yml",
         "nightly.yml",
+        "template-update.yml",
     }
     for path in paths:
         data = workflow(path.name)
@@ -266,7 +267,9 @@ def test_nightly_guard_matches_pipeline_managed_paths(tmp_path: Path) -> None:
         inventory=tmp_path / "papers.csv",
         summary=None,
     )
-    assert tuple(path.relative_to(tmp_path).as_posix() for path in _managed_paths(paths)) == (
+    assert tuple(
+        path.relative_to(tmp_path).as_posix() for path in _managed_paths(paths)
+    ) == (
         "papers.csv",
         ".papers-state.yml",
         "README.md",
@@ -282,3 +285,103 @@ def test_nightly_guard_matches_pipeline_managed_paths(tmp_path: Path) -> None:
 def test_nightly_script_is_executable() -> None:
     script = SCRIPTS / "nightly.sh"
     assert script.stat().st_mode & stat.S_IXUSR
+
+
+def test_template_update_opens_pr_and_never_pushes_main() -> None:
+    data = workflow("template-update.yml")
+    assert data["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+    }
+    assert set(data["on"]) == {"schedule", "workflow_dispatch"}
+    assert data["concurrency"] == {
+        "group": "template-update",
+        "cancel-in-progress": False,
+    }
+    assert set(data["jobs"]) == {"update"}
+    commands = "\n".join(
+        step.get("run", "") for job in data["jobs"].values() for step in job["steps"]
+    )
+    assert 'gh api "repos/$TEMPLATE_REPOSITORY/releases/latest"' in commands
+    assert ".github/scripts/template-update.sh" in commands
+    assert "git push" not in commands
+    assert any(
+        "peter-evans/create-pull-request@" in step.get("uses", "")
+        for step in data["jobs"]["update"]["steps"]
+    )
+    update_step = next(
+        step for step in data["jobs"]["update"]["steps"] if step.get("id") == "update"
+    )
+    assert update_step["run"] == ".github/scripts/template-update.sh"
+    pull_request_step = data["jobs"]["update"]["steps"][-1]
+    assert pull_request_step["if"] == "steps.update.outputs.updated == 'true'"
+
+
+def test_template_update_validates_release_and_handles_noop_and_conflicts() -> None:
+    script = SCRIPTS / "template-update.sh"
+    text = script.read_text(encoding="utf-8")
+    assert script.stat().st_mode & stat.S_IXUSR
+    assert "TEMPLATE_REF:?" in text
+    assert "immutable release tag" in text
+    assert ".copier-answers.yml" in text
+    assert "_commit:" in text
+    assert "already uses template release" in text
+    assert "updated=false" in text
+    assert "updated=true" in text
+    assert "newer than current release" in text
+    assert "Copier update failed" in text
+    assert "Copier update left conflicts" in text
+    assert "uv run copier update" in text
+    assert '--vcs-ref "$template_ref"' in text
+    assert "--answers-file .copier-answers.yml" in text
+    assert "uv lock" in text
+    assert "uv sync --locked --extra dev" in text
+    assert "papers-pipeline validate --config papers.yml" in text
+    assert "pre-commit run --all-files" in text
+    assert "pytest" in text
+    assert "git diff --check" in text
+
+
+@pytest.mark.parametrize(
+    "template_ref",
+    ["", "main", "HEAD", "v1", "v1.2", "refs/heads/main", "v1.2.3;echo bad"],
+)
+def test_template_update_rejects_non_release_refs(
+    tmp_path: Path,
+    template_ref: str,
+) -> None:
+    script = (SCRIPTS / "template-update.sh").resolve()
+    answers = tmp_path / ".copier-answers.yml"
+    answers.write_text("_commit: v1.2.3\n", encoding="utf-8")
+    completed = subprocess.run(
+        [str(script)],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "TEMPLATE_REF": template_ref},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+    assert "TEMPLATE_REF must be an immutable release tag" in completed.stderr
+
+
+@pytest.mark.parametrize("template_ref", ["v1.2.3", "1.2.3"])
+def test_template_update_is_noop_when_release_is_current(
+    tmp_path: Path,
+    template_ref: str,
+) -> None:
+    script = (SCRIPTS / "template-update.sh").resolve()
+    (tmp_path / ".copier-answers.yml").write_text(
+        "_commit: v1.2.3\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [str(script)],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "TEMPLATE_REF": template_ref},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert "already uses template release" in completed.stdout
