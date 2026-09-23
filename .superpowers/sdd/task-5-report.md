@@ -133,3 +133,25 @@ These failures confirmed the new tests were exercising missing Task 5 behavior r
   - `All checks passed!`
 - `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && uv run mypy tests`
   - `Success: no issues found in 1 source file`
+
+## Final deadline semantics fix
+### What changed
+- Restored the brief's exact shared-deadline behavior in `RequestClient`: when the next exponential backoff delay is greater than or equal to the remaining deadline, the client now raises `InfrastructureError("fetch deadline exceeded")` immediately instead of clamping and sleeping.
+- Removed the deadline-limited backoff event path so retry telemetry no longer records a sleep that never happens.
+- Updated the focused deadline regression to assert the client stops after the prior retry sleep and does not overrun the deadline.
+
+### Verification after the fix
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . pytest tests/test_http.py -v`
+  - `10 passed`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . pytest -v`
+  - `49 passed`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . ruff check src tests`
+  - `All checks passed!`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . mypy src`
+  - `Success: no issues found in 10 source files`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && uv run pytest -v`
+  - `2 passed, 2 warnings`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && uv run ruff check .`
+  - `All checks passed!`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && uv run mypy tests`
+  - `Success: no issues found in 1 source file`

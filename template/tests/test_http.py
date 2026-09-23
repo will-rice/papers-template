@@ -94,11 +94,10 @@ async def test_retry_stops_at_total_deadline(
         await client.get_text("https://example.test", {}, {})
 
     assert attempts == 2
-    assert fake_clock.sleeps == [1.0, 1.0]
+    assert fake_clock.sleeps == [1.0]
     assert client.events == [
         "retry 1: HTTP 503 for https://example.test",
         "retry 2: HTTP 503 for https://example.test",
-        "retry 2: deadline-limited backoff for https://example.test",
     ]
 
 

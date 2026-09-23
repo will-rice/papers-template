@@ -133,9 +133,7 @@ class RequestClient:
             return
 
         remaining = self.deadline.remaining()
-        bounded_delay = min(delay, remaining)
-        if bounded_delay != delay:
-            self.events.append(
-                f"retry {attempt + 1}: deadline-limited backoff for {url}"
-            )
-        await self._sleep(bounded_delay)
+        if delay >= remaining:
+            raise InfrastructureError("fetch deadline exceeded")
+
+        await self._sleep(delay)
