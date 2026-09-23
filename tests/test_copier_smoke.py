@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import stat
 import subprocess
 import sys
 
@@ -28,6 +29,12 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     assert (destination / "papers.yml").is_file()
     assert (destination / "papers.schema.json").is_file()
     assert (destination / "topic_plugin.py").is_file()
+    assert (destination / ".github/workflows/ci.yml").is_file()
+    assert (destination / ".github/workflows/nightly.yml").is_file()
+    assert (destination / ".github/workflows/format-corpus.yml").is_file()
+    nightly_script = destination / ".github/scripts/nightly.sh"
+    assert nightly_script.is_file()
+    assert nightly_script.stat().st_mode & stat.S_IXUSR
     env = os.environ.copy()
     env["PYTHONPATH"] = str(destination / "src")
     completed = subprocess.run(
