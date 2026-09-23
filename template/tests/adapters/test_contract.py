@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pytest
+from pydantic import ValidationError
 
 from papers_pipeline.adapters.base import (
     FetchPage,
@@ -76,3 +77,23 @@ def test_fetch_window_is_immutable() -> None:
 
     with pytest.raises(Exception):
         window.start = datetime(2024, 1, 2, tzinfo=timezone.utc)  # type: ignore[misc]
+
+
+def test_fetch_window_rejects_naive_datetimes() -> None:
+    with pytest.raises(
+        ValidationError, match="FetchWindow.start and FetchWindow.end must be timezone-aware"
+    ):
+        FetchWindow(
+            start=datetime(2024, 1, 1),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        )
+
+
+def test_fetch_window_rejects_reversed_interval() -> None:
+    with pytest.raises(
+        ValidationError, match="FetchWindow.start must be before or equal to FetchWindow.end"
+    ):
+        FetchWindow(
+            start=datetime(2024, 1, 8, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )

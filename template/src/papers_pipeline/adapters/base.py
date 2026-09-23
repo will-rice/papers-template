@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
 from collections.abc import Callable, Iterable
+from datetime import datetime
 from typing import Protocol, TypeVar, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from papers_pipeline.config import AdapterConfig
 from papers_pipeline.errors import PaperError
@@ -19,6 +19,18 @@ class FetchWindow(BaseModel):
 
     start: datetime
     end: datetime
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "FetchWindow":
+        if not self._is_aware(self.start) or not self._is_aware(self.end):
+            raise ValueError("FetchWindow.start and FetchWindow.end must be timezone-aware")
+        if self.start > self.end:
+            raise ValueError("FetchWindow.start must be before or equal to FetchWindow.end")
+        return self
+
+    @staticmethod
+    def _is_aware(value: datetime) -> bool:
+        return value.tzinfo is not None and value.utcoffset() is not None
 
 
 class FetchPage(BaseModel):
