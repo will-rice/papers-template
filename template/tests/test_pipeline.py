@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+import subprocess
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+import papers_pipeline.cli as cli
+from papers_pipeline.adapters.base import FetchPage, FetchWindow
+from papers_pipeline.convert import (
+    CommandRunner,
+    InputMaterializer,
+    MaterializedInput,
+)
+from papers_pipeline.errors import ConfigError, InfrastructureError, PaperError
+from papers_pipeline.git import GitRepository
+from papers_pipeline.models import SourceRecord
+from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
+
+NOW = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
+
+
+def record(identifier: str) -> SourceRecord:
+    return SourceRecord(
+        source="arxiv",
+        source_id=identifier,
+        title=f"Neural paper {identifier}",
+        abstract="A useful neural systems paper",
+        authors=("Ada",),
+        published=NOW,
+        url=f"https://example.test/{identifier}",
+        input_format="html",
+        input_url=f"https://example.test/{identifier}.html",
+        categories=("cs.CL",),
+    )
+
+
+class FakeAdapter:
+    name = "arxiv"
+    record_sources = frozenset({"arxiv"})
+    window_type = FetchWindow
+
+    def __init__(self, records: Sequence[SourceRecord]) -> None:
+        self.records = tuple(records)
+        self.calls = 0
+
+    async def fetch(self, *_args: Any, **_kwargs: Any) -> FetchPage:
+        self.calls += 1
+        return FetchPage(
+            records=self.records,
+            next_cursor=None,
+            capped=False,
+        )
+
+
+class FakeClient:
+    events: list[str] = []
+
+    async def __aenter__(self) -> "FakeClient":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+class FakeMaterializer(InputMaterializer):
+    async def materialize(self, paper: Any, root: Path) -> MaterializedInput:
+        path = root / "inputs" / f"{paper.identifier}.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<p>paper</p>", encoding="utf-8")
+        return MaterializedInput(path)
+
+
+class FakeRunner(CommandRunner):
+    def __init__(
+        self,
+        paper_failures: set[str] | None = None,
+        infrastructure_error: InfrastructureError | None = None,
+    ) -> None:
+        self.paper_failures = paper_failures or set()
+        self.infrastructure_error = infrastructure_error
+        self.calls: list[list[str]] = []
+
+    async def run(
+        self, argv: Sequence[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(argv))
+        if argv[0] == "prettier":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if self.infrastructure_error is not None:
+            raise self.infrastructure_error
+        identifier = Path(argv[1]).stem.split(":", 1)[-1]
+        if identifier in self.paper_failures:
+            raise PaperError("bad document")
+        output = Path(next(arg.split("=", 1)[1] for arg in argv if arg.startswith("--output=")))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(f"# {identifier}\n", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+class RecordingGit:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self.paths: list[tuple[Path, ...]] = []
+
+    def commit(self, paths: Sequence[Path], message: str) -> str | None:
+        self.messages.append(message)
+        self.paths.append(tuple(paths))
+        return f"commit-{len(self.messages)}"
+
+
+def make_paths(tmp_path: Path, *, max_batches: int = 1, max_papers: int = 2) -> PipelinePaths:
+    config = {
+        "repository": {
+            "name": "Test",
+            "slug": "test-papers",
+            "description": "Test papers",
+        },
+        "adapters": [
+            {
+                "name": "arxiv",
+                "enabled": True,
+                "lookback_days": 7,
+                "page_size": 10,
+                "max_pages": 1,
+                "max_results": 10,
+                "filters": {"search_query": "all"},
+            }
+        ],
+        "topic": {
+            "include_any": ["neural"],
+            "include_all": [],
+            "exclude_any": [],
+            "categories": [],
+        },
+        "fetch": {
+            "request_timeout_seconds": 10,
+            "retries": 1,
+            "backoff_seconds": 0,
+            "total_deadline_seconds": 60,
+        },
+        "conversion": {
+            "max_batches_per_run": max_batches,
+            "max_papers": max_papers,
+            "max_cost": 100,
+            "html_cost": 1,
+            "latex_cost": 2,
+            "pdf_cost": 10,
+        },
+        "concurrency": {"html": 2, "latex": 1, "pdf": 1},
+    }
+    config_path = tmp_path / "papers.yml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return PipelinePaths(
+        root=tmp_path,
+        config=config_path,
+        state=tmp_path / ".papers-state.yml",
+        inventory=tmp_path / "papers.csv",
+        summary=tmp_path / "step-summary.md",
+    )
+
+
+def dependencies(
+    adapter: FakeAdapter,
+    runner: FakeRunner,
+    git: RecordingGit,
+) -> Dependencies:
+    return Dependencies(
+        environ={},
+        adapters={"arxiv": adapter},
+        client_factory=lambda _deadline: FakeClient(),  # type: ignore[arg-type,return-value]
+        materializer=FakeMaterializer(),
+        runner=runner,
+        git=git,  # type: ignore[arg-type]
+        now=lambda: NOW,
+        monotonic=lambda: 1.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_inventory_commit_precedes_consistent_batch_commit(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    git = RecordingGit()
+    runner = FakeRunner(paper_failures={"bad"})
+
+    summary = await run_nightly(
+        paths,
+        dependencies(FakeAdapter([record("good"), record("bad")]), runner, git),
+    )
+
+    assert git.messages == [
+        "chore: update paper inventory",
+        "chore: convert paper batch 1",
+    ]
+    assert summary.inventory == 2
+    assert summary.attempted == 2
+    assert summary.succeeded == 1
+    assert summary.failed == 1
+    assert paths.state in git.paths[1]
+
+
+@pytest.mark.asyncio
+async def test_infrastructure_failure_summarizes_without_batch_commit(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    git = RecordingGit()
+    runner = FakeRunner(infrastructure_error=InfrastructureError("disk exhausted"))
+
+    with pytest.raises(InfrastructureError, match="disk exhausted"):
+        await run_nightly(
+            paths,
+            dependencies(FakeAdapter([record("one")]), runner, git),
+        )
+
+    assert git.messages == ["chore: update paper inventory"]
+    assert "infrastructure failure: disk exhausted" in paths.summary.read_text()
+
+
+@pytest.mark.asyncio
+async def test_failed_paper_is_attempted_only_once_across_batches(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path, max_batches=3, max_papers=1)
+    git = RecordingGit()
+    runner = FakeRunner(paper_failures={"a"})
+
+    summary = await run_nightly(
+        paths,
+        dependencies(FakeAdapter([record("a"), record("b")]), runner, git),
+    )
+
+    conversion_inputs = [
+        Path(call[1]).stem.split(":", 1)[-1]
+        for call in runner.calls
+        if call[0] == "pandoc"
+    ]
+    assert conversion_inputs == ["a", "b"]
+    assert summary.attempted == 2
+    assert summary.pending == 1
+    assert git.messages[-2:] == [
+        "chore: convert paper batch 1",
+        "chore: convert paper batch 2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_formats_only_outputs_and_index_changed_by_batch(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    git = RecordingGit()
+    runner = FakeRunner()
+
+    await run_nightly(
+        paths,
+        dependencies(FakeAdapter([record("one")]), runner, git),
+    )
+
+    prettier_call = next(call for call in runner.calls if call[0] == "prettier")
+    assert set(prettier_call[2:]) == {
+        str(tmp_path / "README.md"),
+        str(next((tmp_path / "papers").glob("*.md"))),
+    }
+    assert str(paths.inventory) not in prettier_call
+    assert str(paths.state) not in prettier_call
+
+
+@pytest.mark.asyncio
+async def test_no_changes_produce_no_inventory_or_batch_commit(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    first_git = RecordingGit()
+    deps = dependencies(FakeAdapter([record("one")]), FakeRunner(), first_git)
+    await run_nightly(paths, deps)
+
+    second_git = RecordingGit()
+    summary = await run_nightly(
+        paths,
+        dependencies(FakeAdapter([record("one")]), FakeRunner(), second_git),
+    )
+
+    assert second_git.messages == []
+    assert summary.generated == 1
+    assert summary.pending == 0
+
+
+@pytest.mark.asyncio
+async def test_invalid_topic_plugin_is_rejected_before_fetch(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    raw = yaml.safe_load(paths.config.read_text(encoding="utf-8"))
+    raw["topic"]["plugin"] = "papers_pipeline.topics:not_present"
+    paths.config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    adapter = FakeAdapter([record("one")])
+
+    with pytest.raises(ConfigError, match="invalid topic plugin"):
+        await run_nightly(
+            paths,
+            dependencies(adapter, FakeRunner(), RecordingGit()),
+        )
+
+    assert adapter.calls == 0
+    assert not paths.inventory.exists()
+
+
+def test_git_repository_commits_only_exact_changed_paths_and_deletions(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    kept = tmp_path / "kept.txt"
+    deleted = tmp_path / "deleted.txt"
+    unrelated = tmp_path / "unrelated.txt"
+    for path in (kept, deleted, unrelated):
+        path.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    kept.write_text("changed\n", encoding="utf-8")
+    deleted.unlink()
+    unrelated.write_text("do not commit\n", encoding="utf-8")
+
+    repository = GitRepository(tmp_path)
+    commit = repository.commit([kept, deleted], "update selected")
+    noop = repository.commit([kept, deleted], "nothing else")
+
+    assert commit is not None
+    assert noop is None
+    changed = subprocess.check_output(
+        ["git", "show", "--pretty=", "--name-only", "HEAD"],
+        cwd=tmp_path,
+        text=True,
+    ).splitlines()
+    assert changed == ["deleted.txt", "kept.txt"]
+    assert subprocess.check_output(
+        ["git", "status", "--short"],
+        cwd=tmp_path,
+        text=True,
+    ).strip() == "M unrelated.txt"
+
+
+def test_format_corpus_cli_selects_only_requested_shard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    for name in ("a.md", "b.md", "c.md"):
+        (papers / name).write_text(name, encoding="utf-8")
+    selected: list[Path] = []
+
+    async def capture(paths: Sequence[Path], _runner: CommandRunner) -> None:
+        selected.extend(paths)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "format_changed", capture)
+
+    assert cli.app(["format-corpus", "--shard-index", "1", "--shard-count", "2"]) == 0
+    assert selected == [papers / "b.md"]
+
+
+def test_nightly_cli_builds_real_dependency_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = make_paths(tmp_path)
+    captured: list[Dependencies] = []
+
+    async def capture(_paths: PipelinePaths, deps: Dependencies) -> None:
+        captured.append(deps)
+
+    monkeypatch.setattr(cli, "run_nightly", capture)
+    monkeypatch.setattr(cli, "build_adapters", lambda *_args: {})
+
+    assert cli.app(["nightly", "--config", str(paths.config)]) == 0
+    assert isinstance(captured[0].git, GitRepository)
+    assert isinstance(captured[0].runner, CommandRunner)
+    assert captured[0].materializer.__class__.__name__ == "DownloadingMaterializer"

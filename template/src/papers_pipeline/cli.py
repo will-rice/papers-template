@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Sequence
 
+from papers_pipeline.adapters import build_adapters
 from papers_pipeline.config import load_config
+from papers_pipeline.convert import CommandRunner, DownloadingMaterializer
 from papers_pipeline.errors import ConfigError
+from papers_pipeline.formatting import format_changed, shard_paths
+from papers_pipeline.git import GitRepository
+from papers_pipeline.http import RequestClient
+from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
 
 
 def app(argv: Sequence[str] | None = None) -> int:
@@ -19,6 +28,11 @@ def app(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser("validate")
     validate.add_argument("--config", type=Path, default=Path("papers.yml"))
+    nightly = subparsers.add_parser("nightly")
+    nightly.add_argument("--config", type=Path, default=Path("papers.yml"))
+    format_corpus = subparsers.add_parser("format-corpus")
+    format_corpus.add_argument("--shard-index", type=int, required=True)
+    format_corpus.add_argument("--shard-count", type=int, required=True)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command == "validate":
@@ -28,6 +42,48 @@ def app(argv: Sequence[str] | None = None) -> int:
             print(f"error: fix {args.config}: {error}", file=sys.stderr)
             return 2
         print(f"valid: {args.config}")
+    elif args.command == "nightly":
+        try:
+            config = load_config(args.config, os.environ)
+        except ConfigError as error:
+            print(f"error: fix {args.config}: {error}", file=sys.stderr)
+            return 2
+        root = args.config.resolve().parent
+        summary_path = (
+            Path(os.environ["GITHUB_STEP_SUMMARY"])
+            if "GITHUB_STEP_SUMMARY" in os.environ
+            else None
+        )
+        dependencies = Dependencies(
+            environ=os.environ,
+            adapters=build_adapters(config, os.environ),
+            client_factory=lambda deadline: RequestClient(config.fetch, deadline),
+            materializer=DownloadingMaterializer(),
+            runner=CommandRunner(),
+            git=GitRepository(root),
+            now=lambda: datetime.now(timezone.utc),
+            monotonic=time.monotonic,
+        )
+        asyncio.run(
+            run_nightly(
+                PipelinePaths(
+                    root=root,
+                    config=args.config,
+                    state=root / ".papers-state.yml",
+                    inventory=root / "papers.csv",
+                    summary=summary_path,
+                ),
+                dependencies,
+            )
+        )
+    elif args.command == "format-corpus":
+        root = Path.cwd()
+        selected = shard_paths(
+            sorted((root / "papers").glob("*.md")),
+            args.shard_index,
+            args.shard_count,
+        )
+        asyncio.run(format_changed(selected, CommandRunner()))
     return 0
 
 
