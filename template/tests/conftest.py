@@ -787,3 +787,391 @@ def _load_recorded_route(
             mode,
         )
     return status_code, headers, fixture_path.read_bytes(), mode
+
+
+def _biorxiv_route(*, start_date: str, end_date: str, offset: int) -> str:
+    return f"https://api.biorxiv.org/details/biorxiv/{start_date}/{end_date}/{offset}"
+
+
+def _crossref_route(*, start_date: str, end_date: str, page_size: int, cursor: str) -> str:
+    return str(
+        httpx.URL(
+            "https://api.crossref.org/works",
+            params={
+                "filter": f"from-pub-date:{start_date},until-pub-date:{end_date}",
+                "rows": str(page_size),
+                "cursor": cursor,
+            },
+        )
+    )
+
+
+def _papers_with_code_route(*, page_size: int, page: int | None = None) -> str:
+    base_url = httpx.URL(
+        "https://paperswithcode.com/api/v1/papers/"
+        if page is None
+        else f"https://paperswithcode.com/api/v1/papers/?page={page}"
+    )
+    return str(
+        base_url.copy_with(
+            query=str(
+                httpx.QueryParams(
+                    {
+                        **({"page": str(page)} if page is not None else {}),
+                        "items_per_page": str(page_size),
+                    }
+                )
+            ).encode()
+        )
+    )
+
+
+@pytest.fixture
+def biorxiv_config() -> AdapterConfig:
+    return AdapterConfig(
+        name="biorxiv_crossref",
+        lookback_days=7,
+        page_size=1,
+        max_pages=10,
+        max_results=10,
+        filters={"provider": "biorxiv"},
+    )
+
+
+@pytest.fixture
+def biorxiv_client(
+    fetch_config: FetchConfig,
+    biorxiv_config: AdapterConfig,
+) -> RecordedRequestClient:
+    return _recording_request_client(
+        config=fetch_config,
+        routes={
+            _biorxiv_route(start_date="2024-01-01", end_date="2024-01-08", offset=0): {
+                "fixture": "adapters/biorxiv_crossref/biorxiv.json",
+            },
+            _biorxiv_route(start_date="2024-01-01", end_date="2024-01-08", offset=1): {
+                "fixture": "adapters/biorxiv_crossref/biorxiv-page-2.json",
+            },
+        },
+    )
+
+
+@pytest.fixture
+def biorxiv_malformed_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    biorxiv_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _biorxiv_route(start_date="2024-01-01", end_date="2024-01-08", offset=0): {
+                "fixture": "adapters/biorxiv_crossref/biorxiv-malformed-record.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def biorxiv_invalid_json_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    biorxiv_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _biorxiv_route(start_date="2024-01-01", end_date="2024-01-08", offset=0): {
+                "fixture": "adapters/biorxiv_crossref/biorxiv-invalid.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def biorxiv_out_of_window_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    biorxiv_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _biorxiv_route(start_date="2024-01-01", end_date="2024-01-08", offset=0): {
+                "fixture": "adapters/biorxiv_crossref/biorxiv-out-of-window-only.json",
+            },
+            _biorxiv_route(start_date="2024-01-01", end_date="2024-01-08", offset=1): {
+                "fixture": "adapters/biorxiv_crossref/biorxiv-page-2.json",
+            },
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def crossref_config() -> AdapterConfig:
+    return AdapterConfig(
+        name="biorxiv_crossref",
+        lookback_days=7,
+        page_size=1,
+        max_pages=10,
+        max_results=10,
+        filters={"provider": "crossref"},
+    )
+
+
+@pytest.fixture
+def crossref_client(
+    fetch_config: FetchConfig,
+    crossref_config: AdapterConfig,
+) -> RecordedRequestClient:
+    return _recording_request_client(
+        config=fetch_config,
+        routes={
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref.json",
+            },
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="cursor-2",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-page-2.json",
+            },
+        },
+    )
+
+
+@pytest.fixture
+def crossref_malformed_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    crossref_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-malformed-record.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def crossref_invalid_json_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    crossref_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-invalid.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def crossref_invalid_payload_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    crossref_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-invalid-payload.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def crossref_malformed_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    crossref_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-malformed-only.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_config() -> AdapterConfig:
+    return AdapterConfig(
+        name="papers_with_code",
+        lookback_days=7,
+        page_size=1,
+        max_pages=10,
+        max_results=10,
+        filters={},
+    )
+
+
+@pytest.fixture
+def papers_with_code_client(
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RecordedRequestClient:
+    return _recording_request_client(
+        config=fetch_config,
+        routes={
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page.json",
+            },
+            _papers_with_code_route(page_size=papers_with_code_config.page_size, page=2): {
+                "fixture": "adapters/papers_with_code/page-2.json",
+            },
+        },
+    )
+
+
+@pytest.fixture
+def papers_with_code_malformed_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-malformed-record.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_invalid_json_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-invalid.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_invalid_payload_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-invalid-payload.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_auth_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page.json",
+                "status_code": 403,
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_out_of_window_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-out-of-window-only.json",
+            },
+            _papers_with_code_route(page_size=papers_with_code_config.page_size, page=2): {
+                "fixture": "adapters/papers_with_code/page-2.json",
+            },
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_malformed_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-malformed-only.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_untrusted_next_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-untrusted-next.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
