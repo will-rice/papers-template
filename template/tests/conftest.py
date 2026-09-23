@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from collections.abc import Callable
 
+import httpx
 import pytest
 
 from papers_pipeline.config import TopicConfig
@@ -53,3 +55,15 @@ def topic_config() -> TopicConfig:
         categories=[],
         plugin=None,
     )
+
+
+@pytest.fixture
+def fixture_transport() -> Callable[[dict[str, tuple[int, str]]], httpx.MockTransport]:
+    def build(routes: dict[str, tuple[int, str]]) -> httpx.MockTransport:
+        def handler(request: httpx.Request) -> httpx.Response:
+            status, body = routes[str(request.url)]
+            return httpx.Response(status, text=body)
+
+        return httpx.MockTransport(handler)
+
+    return build
