@@ -27,6 +27,22 @@ class RecordedRoute(TypedDict, total=False):
 FixtureTransport = Callable[[dict[str, RecordedRoute]], httpx.MockTransport]
 
 
+class RecordedRequestClient(RequestClient):
+    def __init__(
+        self,
+        *,
+        config: FetchConfig,
+        transport: httpx.AsyncBaseTransport,
+        requests: list[httpx.Request],
+    ) -> None:
+        super().__init__(
+            config=config,
+            deadline=Deadline.start(config.total_deadline_seconds),
+            transport=transport,
+        )
+        self.requests = requests
+
+
 @pytest.fixture
 def source_record() -> SourceRecord:
     return SourceRecord(
@@ -117,6 +133,33 @@ def _request_client(
     )
 
 
+def _recording_request_client(
+    *,
+    config: FetchConfig,
+    routes: dict[str, RecordedRoute],
+) -> RecordedRequestClient:
+    recorded_routes = {
+        url: _load_recorded_route(spec) for url, spec in routes.items()
+    }
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        url = str(request.url)
+        if url not in recorded_routes:
+            raise AssertionError(f"unexpected recorded fixture URL: {request.method} {url}")
+        status_code, headers, body, mode = recorded_routes[url]
+        if mode == "text":
+            return httpx.Response(status_code, headers=headers, text=cast(str, body))
+        return httpx.Response(status_code, headers=headers, content=body)
+
+    return RecordedRequestClient(
+        config=config,
+        transport=httpx.MockTransport(handler),
+        requests=requests,
+    )
+
+
 def _arxiv_route(*, start: int, page_size: int, search_query: str) -> str:
     return (
         "https://export.arxiv.org/api/query"
@@ -128,6 +171,37 @@ def _huggingface_route(*, page: int, page_size: int, date: str) -> str:
     return (
         "https://huggingface.co/api/daily_papers"
         f"?date={date}&p={page}&limit={page_size}"
+    )
+
+
+def _semantic_scholar_route(*, offset: int, page_size: int, query: str) -> str:
+    return str(
+        httpx.URL(
+            "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+            params={
+                "query": query,
+                "offset": str(offset),
+                "limit": str(page_size),
+                "fields": (
+                    "paperId,title,abstract,authors,publicationDate,url,"
+                    "externalIds,openAccessPdf"
+                ),
+            },
+        )
+    )
+
+
+def _dblp_route(*, offset: int, page_size: int, query: str) -> str:
+    return str(
+        httpx.URL(
+            "https://dblp.org/search/publ/api",
+            params={
+                "q": query,
+                "f": str(offset),
+                "h": str(page_size),
+                "format": "json",
+            },
+        )
     )
 
 
@@ -377,6 +451,287 @@ def huggingface_malformed_only_client(
                 date="2024-01-08",
             ): {
                 "fixture": "adapters/huggingface/page-malformed-only.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def semantic_scholar_config() -> AdapterConfig:
+    return AdapterConfig(
+        name="semantic_scholar",
+        secret_env="SEMANTIC_SCHOLAR_API_KEY",
+        lookback_days=7,
+        page_size=1,
+        max_pages=10,
+        max_results=10,
+        filters={"query": "speech recognition"},
+    )
+
+
+@pytest.fixture
+def semantic_scholar_client(
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RecordedRequestClient:
+    return _recording_request_client(
+        config=fetch_config,
+        routes={
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page.json",
+            },
+            _semantic_scholar_route(
+                offset=1,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-2.json",
+            },
+        },
+    )
+
+
+@pytest.fixture
+def semantic_scholar_malformed_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-malformed-record.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def semantic_scholar_invalid_json_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-invalid.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def semantic_scholar_invalid_payload_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-invalid-payload.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def semantic_scholar_auth_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page.json",
+                "status_code": 401,
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def semantic_scholar_out_of_window_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-out-of-window-only.json",
+            },
+            _semantic_scholar_route(
+                offset=1,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-2.json",
+            },
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def semantic_scholar_malformed_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-malformed-only.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def dblp_config() -> AdapterConfig:
+    return AdapterConfig(
+        name="dblp",
+        lookback_days=7,
+        page_size=1,
+        max_pages=10,
+        max_results=10,
+        filters={"query": "speech recognition"},
+    )
+
+
+@pytest.fixture
+def dblp_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    dblp_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page.json",
+            },
+            _dblp_route(offset=1, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page-2.json",
+            },
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def dblp_malformed_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    dblp_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page-malformed-record.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def dblp_invalid_json_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    dblp_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page-invalid.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def dblp_invalid_payload_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    dblp_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page-invalid-payload.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def dblp_out_of_window_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    dblp_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page-out-of-window-only.json",
+            },
+            _dblp_route(offset=1, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page-2.json",
+            },
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def dblp_malformed_only_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    dblp_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+                "fixture": "adapters/dblp/page-malformed-only.json",
             }
         }
     )
