@@ -32,8 +32,8 @@ def clean(value: str) -> str:
 
 
 def normalize(record: SourceRecord) -> Paper:
-    doi = _clean_optional(record.doi)
-    arxiv_id = _clean_optional(record.arxiv_id)
+    doi = _canonical_doi(record.doi)
+    arxiv_id = _canonical_arxiv_id(record.arxiv_id)
     identifier = _identifier(
         source=record.source,
         source_id=record.source_id,
@@ -53,7 +53,7 @@ def normalize(record: SourceRecord) -> Paper:
         categories=tuple(
             sorted({category for category in map(clean, record.categories) if category})
         ),
-        doi=doi.casefold() if doi else None,
+        doi=doi,
         arxiv_id=arxiv_id,
     )
 
@@ -111,9 +111,19 @@ def deduplicate(papers: Iterable[Paper]) -> list[Paper]:
 
 def _merge_clusters(left: _Cluster, right: _Cluster) -> _Cluster:
     preferred = min((left.paper, right.paper), key=_preference_key)
+    other = right.paper if preferred == left.paper else left.paper
     categories = tuple(sorted({*left.paper.categories, *right.paper.categories}))
+    doi = _merge_identifier_value(preferred.doi, other.doi)
+    arxiv_id = _merge_identifier_value(preferred.arxiv_id, other.arxiv_id)
     return _Cluster(
-        paper=preferred.model_copy(update={"categories": categories}),
+        paper=preferred.model_copy(
+            update={
+                "identifier": _merged_identifier(preferred, doi=doi, arxiv_id=arxiv_id),
+                "categories": categories,
+                "doi": doi,
+                "arxiv_id": arxiv_id,
+            }
+        ),
         strong_keys=left.strong_keys | right.strong_keys,
         bibliographic_keys=left.bibliographic_keys | right.bibliographic_keys,
     )
@@ -148,12 +158,40 @@ def _clean_optional(value: str | None) -> str | None:
     return normalized or None
 
 
+def _canonical_doi(value: str | None) -> str | None:
+    cleaned = _clean_optional(value)
+    if cleaned is None:
+        return None
+    return cleaned.casefold()
+
+
+def _canonical_arxiv_id(value: str | None) -> str | None:
+    cleaned = _clean_optional(value)
+    if cleaned is None:
+        return None
+    return re.sub(r"(?i)^arxiv:\s*", "", cleaned).casefold()
+
+
+def _merge_identifier_value(preferred: str | None, other: str | None) -> str | None:
+    return preferred or other
+
+
+def _merged_identifier(preferred: Paper, *, doi: str | None, arxiv_id: str | None) -> str:
+    if arxiv_id:
+        return f"arxiv:{arxiv_id}"
+    if doi:
+        return f"doi:{doi}"
+    return preferred.identifier
+
+
 def _strong_keys(paper: Paper) -> set[str]:
     keys: set[str] = set()
-    if paper.arxiv_id:
-        keys.add(f"arxiv:{paper.arxiv_id.casefold()}")
-    if paper.doi:
-        keys.add(f"doi:{paper.doi.casefold()}")
+    arxiv_id = _canonical_arxiv_id(paper.arxiv_id)
+    doi = _canonical_doi(paper.doi)
+    if arxiv_id:
+        keys.add(f"arxiv:{arxiv_id}")
+    if doi:
+        keys.add(f"doi:{doi}")
     return keys
 
 

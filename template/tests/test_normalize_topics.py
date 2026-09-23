@@ -38,6 +38,24 @@ def test_normalize_sets_identifier_and_canonical_fields(source_record) -> None:
     assert paper.categories == ("cs.AI", "cs.CL")
 
 
+@pytest.mark.parametrize(
+    ("raw_arxiv_id", "expected"),
+    [
+        ("2401.00001V2", "2401.00001v2"),
+        (" arXiv:2401.00001V2 ", "2401.00001v2"),
+        (" arXiv:CS.CL/0101010V1 ", "cs.cl/0101010v1"),
+        ("math.GT/0309136", "math.gt/0309136"),
+    ],
+)
+def test_normalize_canonicalizes_arxiv_ids(
+    source_record, raw_arxiv_id: str, expected: str
+) -> None:
+    paper = normalize(source_record.model_copy(update={"arxiv_id": raw_arxiv_id}))
+
+    assert paper.arxiv_id == expected
+    assert paper.identifier == f"arxiv:{expected}"
+
+
 def test_dedupe_prefers_arxiv_then_doi_then_source(source_record) -> None:
     arxiv = normalize(
         source_record.model_copy(update={"source": "arxiv", "arxiv_id": "2401.1"})
@@ -87,6 +105,60 @@ def test_deduplicate_prefers_strong_id_match_over_bibliographic_fallback(source_
     )
 
     assert deduplicate([weak_match, arxiv]) == [arxiv]
+
+
+def test_deduplicate_backfills_doi_from_lower_ranked_duplicate(source_record) -> None:
+    arxiv = normalize(
+        source_record.model_copy(
+            update={"source": "arxiv", "source_id": "2401.1", "arxiv_id": "2401.1"}
+        )
+    )
+    semantic = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "source_id": "semantic-1",
+                "arxiv_id": "2401.1",
+                "doi": "10.1000/ABC.DEF",
+            }
+        )
+    )
+
+    [paper] = deduplicate([semantic, arxiv])
+
+    assert paper.source == "arxiv"
+    assert paper.arxiv_id == "2401.1"
+    assert paper.doi == "10.1000/abc.def"
+    assert paper.identifier == "arxiv:2401.1"
+
+
+def test_deduplicate_keeps_preferred_conflicting_ids_deterministically(source_record) -> None:
+    arxiv = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "source_id": "2401.1",
+                "arxiv_id": "2401.1",
+                "doi": "10.1000/PREFERRED",
+            }
+        )
+    )
+    semantic = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "source_id": "semantic-1",
+                "arxiv_id": "2401.1",
+                "doi": "10.1000/OTHER",
+            }
+        )
+    )
+
+    first, second = deduplicate([semantic, arxiv]), deduplicate([arxiv, semantic])
+
+    assert first == second == [
+        arxiv.model_copy(update={"doi": "10.1000/preferred"})
+    ]
 
 
 def test_deduplicate_source_precedence_is_order_independent(source_record) -> None:
