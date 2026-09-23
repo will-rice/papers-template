@@ -109,3 +109,27 @@ These failures confirmed the new tests were exercising missing Task 5 behavior r
 ### Notes
 - `httpx.RemoteProtocolError` is now retried under the existing bounded policy.
 - `httpx.TooManyRedirects` now fails immediately with `InfrastructureError("too many redirects: <url>")`.
+
+## 3xx redirect fix
+### What changed
+- Added an explicit 3xx guard in `RequestClient.get_text()` so redirect responses never fall through to success text.
+- Classified plain redirects as immediate infrastructure failures with `InfrastructureError("redirect HTTP <status>: <url>")`.
+
+### Focused regression test
+- Added `test_redirect_302_is_not_treated_as_success`
+
+### Verification after the fix
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . pytest tests/test_http.py -v`
+  - `10 passed in 0.03s`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . pytest -v`
+  - `49 passed in 0.10s`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . ruff check src tests`
+  - `All checks passed!`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run --project . mypy src`
+  - `Success: no issues found in 10 source files`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && uv run pytest -v`
+  - `2 passed, 2 warnings`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && uv run ruff check .`
+  - `All checks passed!`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && uv run mypy tests`
+  - `Success: no issues found in 1 source file`

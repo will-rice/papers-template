@@ -91,6 +91,10 @@ class RequestClient:
             else:
                 if response.status_code in {401, 403}:
                     raise InfrastructureError(f"authentication failed: {url}")
+                if 300 <= response.status_code < 400:
+                    raise InfrastructureError(
+                        f"redirect HTTP {response.status_code}: {url}"
+                    )
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == self.config.retries:
                         raise InfrastructureError(

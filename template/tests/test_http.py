@@ -193,6 +193,34 @@ async def test_permanent_401_is_not_retried(
 
 
 @pytest.mark.asyncio
+async def test_redirect_302_is_not_treated_as_success(
+    fetch_config: FetchConfig, fake_clock: FakeClock
+) -> None:
+    attempts = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(302, text="moved")
+
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(30, fake_clock),
+        transport=httpx.MockTransport(handler),
+        sleep=fake_clock.sleep,
+    )
+
+    with pytest.raises(
+        InfrastructureError, match="redirect HTTP 302: https://example.test"
+    ):
+        await client.get_text("https://example.test", {}, {})
+
+    assert attempts == 1
+    assert fake_clock.sleeps == []
+    assert client.events == []
+
+
+@pytest.mark.asyncio
 async def test_too_many_redirects_fails_immediately(
     fetch_config: FetchConfig, fake_clock: FakeClock
 ) -> None:
