@@ -1,0 +1,121 @@
+"""Deadline-aware HTTP client with bounded retry behavior."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+
+import httpx
+
+from .config import FetchConfig
+from .errors import InfrastructureError
+
+_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+@dataclass(frozen=True)
+class Deadline:
+    """Shared fetch deadline carried across multiple requests."""
+
+    expires_at: float
+    clock: Callable[[], float]
+
+    @classmethod
+    def start(
+        cls, seconds: float, clock: Callable[[], float] = time.monotonic
+    ) -> Deadline:
+        return cls(clock() + seconds, clock)
+
+    def remaining(self) -> float:
+        remaining = self.expires_at - self.clock()
+        if remaining <= 0:
+            raise InfrastructureError("fetch deadline exceeded")
+        return remaining
+
+
+class RequestClient:
+    """Thin retrying HTTP client that respects a shared total deadline."""
+
+    def __init__(
+        self,
+        config: FetchConfig,
+        deadline: Deadline,
+        transport: httpx.AsyncBaseTransport | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self.config = config
+        self.deadline = deadline
+        self._client = httpx.AsyncClient(transport=transport)
+        self._sleep = sleep
+        self.events: list[str] = []
+
+    async def __aenter__(self) -> RequestClient:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object | None,
+    ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def get_text(
+        self, url: str, params: Mapping[str, str], headers: Mapping[str, str]
+    ) -> str:
+        for attempt in range(self.config.retries + 1):
+            timeout = min(
+                self.config.request_timeout_seconds,
+                self.deadline.remaining(),
+            )
+            try:
+                response = await self._client.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as error:
+                if attempt == self.config.retries:
+                    raise InfrastructureError(f"request retries exhausted: {url}") from error
+                self.events.append(f"retry {attempt + 1}: network failure for {url}")
+            else:
+                if response.status_code in {401, 403}:
+                    raise InfrastructureError(f"authentication failed: {url}")
+                if response.status_code in _RETRYABLE_STATUS_CODES:
+                    if attempt == self.config.retries:
+                        raise InfrastructureError(
+                            f"request retries exhausted: {url}"
+                        )
+                    self.events.append(
+                        f"retry {attempt + 1}: HTTP {response.status_code} for {url}"
+                    )
+                elif response.is_error:
+                    raise InfrastructureError(
+                        f"permanent HTTP {response.status_code}: {url}"
+                    )
+                else:
+                    return response.text
+
+            await self._sleep_with_deadline(url, attempt)
+
+        raise AssertionError("retry loop exhausted without result")
+
+    async def _sleep_with_deadline(self, url: str, attempt: int) -> None:
+        delay = self.config.backoff_seconds * (2**attempt)
+        if delay <= 0:
+            return
+
+        remaining = self.deadline.remaining()
+        bounded_delay = min(delay, remaining)
+        if bounded_delay != delay:
+            self.events.append(
+                f"retry {attempt + 1}: deadline-limited backoff for {url}"
+            )
+        await self._sleep(bounded_delay)
+
