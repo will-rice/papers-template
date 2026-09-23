@@ -57,13 +57,15 @@ async def test_format_changed_passes_exact_paths_and_sorts_deduplicates(
     first = tmp_path / "generated papers" / "b.md"
     second = tmp_path / "generated papers" / "a.md"
     third = tmp_path / "README.md"
+    unsupported = tmp_path / "notes.txt"
     for path in (first, second, third):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x", encoding="utf-8")
+    unsupported.write_text("x", encoding="utf-8")
 
     runner = RecordingRunner()
 
-    await format_changed([first, third, second, first, third], runner)
+    await format_changed([first, third, second, first, third, unsupported], runner)
 
     assert runner.calls == [
         [
@@ -76,13 +78,15 @@ async def test_format_changed_passes_exact_paths_and_sorts_deduplicates(
     ]
     assert all("*" not in arg for arg in runner.calls[0])
     assert "generated papers" in runner.calls[0][3]
+    assert str(unsupported) not in runner.calls[0]
 
 
 @pytest.mark.asyncio
-async def test_format_changed_is_noop_for_empty_input() -> None:
+async def test_format_changed_is_noop_for_empty_or_unsupported_input() -> None:
     runner = RecordingRunner()
 
     await format_changed([], runner)
+    await format_changed([Path("notes.txt"), Path("script.py")], runner)
 
     assert runner.calls == []
 
@@ -121,7 +125,10 @@ def test_shard_paths_partitions_sorted_corpus_exactly_once(tmp_path: Path) -> No
         tmp_path / "middle.md",
     ]
 
-    shards = [shard_paths(list(reversed(corpus)), index, 3) for index in range(3)]
+    shards = [
+        shard_paths(list(reversed(corpus)) + [corpus[1], corpus[3], corpus[1]], index, 3)
+        for index in range(3)
+    ]
     ordered = tuple(sorted(corpus))
 
     assert shards[0] == tuple(path for position, path in enumerate(ordered) if position % 3 == 0)

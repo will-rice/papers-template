@@ -45,3 +45,18 @@
 
 - No workflow changes were added.
 - The implementation stays within the existing `CommandRunner` error classification boundary rather than re-parsing formatter output.
+
+## Task 13 Findings Fix Addendum
+
+Updated the task 13 implementation to address the remaining review findings:
+
+- `shard_paths` now deduplicates before sorting and modulo assignment, and the regression test covers repeated paths staying in a single shard.
+- `format_changed` now only formats exact safe suffixes from the brief: `.md`, `.yml`, `.yaml`, and `.json`.
+- Unsupported paths are omitted, spaces in paths remain preserved as exact argv items, and empty/unsupported selections skip the runner entirely.
+
+Validation rerun after the fix:
+
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && PYTHONPATH=template/src uv run pytest template/tests/test_formatting.py -q` → `11 passed`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle/template && PYTHONPATH=src uv run pytest tests -q` → `170 passed`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && PYTHONPATH=template/src uv run ruff check template/src/papers_pipeline template/tests/test_formatting.py` → `All checks passed!`
+- `cd /Users/will/projects/copilot-worktrees/papers-template/will-rice-automatic-barnacle && PYTHONPATH=template/src uv run mypy template/src/papers_pipeline template/tests/test_formatting.py` → `Success: no issues found in 24 source files`
