@@ -1032,6 +1032,68 @@ def crossref_malformed_only_client(
 
 
 @pytest.fixture
+def crossref_last_missing_next_cursor_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    crossref_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-last-missing-next-cursor.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def crossref_last_blank_next_cursor_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    crossref_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=crossref_config.page_size,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-last-blank-next-cursor.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def crossref_last_local_truncation_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _crossref_route(
+                start_date="2024-01-01",
+                end_date="2024-01-08",
+                page_size=2,
+                cursor="*",
+            ): {
+                "fixture": "adapters/biorxiv_crossref/crossref-last-local-truncation.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
 def papers_with_code_config() -> AdapterConfig:
     return AdapterConfig(
         name="papers_with_code",
@@ -1171,6 +1233,53 @@ def papers_with_code_untrusted_next_client(
         {
             _papers_with_code_route(page_size=papers_with_code_config.page_size): {
                 "fixture": "adapters/papers_with_code/page-untrusted-next.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_last_null_next_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-last-null-next.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_last_blank_next_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    papers_with_code_config: AdapterConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=papers_with_code_config.page_size): {
+                "fixture": "adapters/papers_with_code/page-last-blank-next.json",
+            }
+        }
+    )
+    return _request_client(config=fetch_config, transport=transport)
+
+
+@pytest.fixture
+def papers_with_code_last_local_truncation_client(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+) -> RequestClient:
+    transport = fixture_transport(
+        {
+            _papers_with_code_route(page_size=2): {
+                "fixture": "adapters/papers_with_code/page-last-local-truncation.json",
             }
         }
     )

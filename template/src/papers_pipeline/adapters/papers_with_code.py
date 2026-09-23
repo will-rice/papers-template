@@ -49,18 +49,41 @@ class PapersWithCodeAdapter:
                 permanent_errors=errors,
             )
 
-        next_state: _CursorState = {
-            "consumed": state["consumed"] + len(items),
-            "page": state["page"] + 1,
-            "url": next_url or state["url"],
-        }
-        next_cursor = _encode_cursor(next_state)
+        consumed = state["consumed"] + (0 if state["local_index"] else len(items))
+        page = state["page"] + (0 if state["local_index"] else 1)
+        remaining_records = _remaining_records(
+            filtered_records,
+            local_index=state["local_index"],
+            cursor=cursor,
+        )
+        page_records = remaining_records[: config.max_results]
+        next_cursor: str | None
+        if len(remaining_records) > len(page_records):
+            next_cursor = _encode_cursor(
+                {
+                    "consumed": consumed,
+                    "local_index": state["local_index"] + len(page_records),
+                    "page": page,
+                    "url": state["url"],
+                }
+            )
+        elif next_url is not None:
+            next_cursor = _encode_cursor(
+                {
+                    "consumed": consumed,
+                    "local_index": 0,
+                    "page": page,
+                    "url": next_url,
+                }
+            )
+        else:
+            next_cursor = None
         capped = (
-            next_state["page"] >= config.max_pages
-            or next_state["consumed"] >= config.max_results
+            page >= config.max_pages
+            or consumed >= config.max_results
         )
         return FetchPage(
-            records=filtered_records[: config.max_results],
+            records=page_records,
             next_cursor=next_cursor,
             capped=capped,
             permanent_errors=errors,
@@ -69,6 +92,7 @@ class PapersWithCodeAdapter:
 
 class _CursorState(TypedDict):
     consumed: int
+    local_index: int
     page: int
     url: str
 
@@ -86,6 +110,8 @@ def _payload_page(text: str) -> tuple[list[object], str | None]:
     next_value = payload.get("next")
     if next_value is None:
         return items, None
+    if isinstance(next_value, str) and not _clean(next_value):
+        return items, None
     next_url = _validate_next_url(next_value)
     return items, next_url
 
@@ -97,7 +123,7 @@ def _encode_cursor(state: _CursorState) -> str:
 
 def _decode_cursor(cursor: str | None) -> _CursorState:
     if cursor is None:
-        return {"consumed": 0, "page": 0, "url": _BASE_URL}
+        return {"consumed": 0, "local_index": 0, "page": 0, "url": _BASE_URL}
 
     padding = "=" * (-len(cursor) % 4)
     try:
@@ -111,12 +137,25 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
         raise InfrastructureError(f"invalid papers_with_code continuation cursor: {cursor}")
 
     consumed = data.get("consumed")
+    local_index = data.get("local_index", 0)
     page = data.get("page")
     url = data.get("url")
-    if not isinstance(consumed, int) or consumed < 0 or not isinstance(page, int) or page < 0:
+    if (
+        not isinstance(consumed, int)
+        or consumed < 0
+        or not isinstance(local_index, int)
+        or local_index < 0
+        or not isinstance(page, int)
+        or page < 0
+    ):
         raise InfrastructureError(f"invalid papers_with_code continuation cursor: {cursor}")
     validated_url = _validate_next_url(url)
-    return {"consumed": consumed, "page": page, "url": validated_url}
+    return {
+        "consumed": consumed,
+        "local_index": local_index,
+        "page": page,
+        "url": validated_url,
+    }
 
 
 def _request_target(url: str, *, page_size: int) -> tuple[str, dict[str, str]]:
@@ -138,6 +177,16 @@ def _validate_next_url(value: object) -> str:
     ):
         raise InfrastructureError("invalid papers_with_code next url")
     return str(url)
+
+
+def _remaining_records(
+    records: tuple[SourceRecord, ...], *, local_index: int, cursor: str | None
+) -> tuple[SourceRecord, ...]:
+    if local_index > len(records):
+        raise InfrastructureError(
+            f"invalid papers_with_code continuation cursor: {cursor or '<initial>'}"
+        )
+    return records[local_index:]
 
 
 def parse_papers_with_code(item: object) -> SourceRecord:

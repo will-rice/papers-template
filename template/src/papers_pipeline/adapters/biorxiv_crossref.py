@@ -30,6 +30,7 @@ class BiorxivCrossrefAdapter:
     ) -> FetchPage:
         provider = _provider(config)
         state = _decode_cursor(cursor, provider=provider)
+        next_token: str | None
 
         if provider == _BIORXIV:
             items = await _fetch_biorxiv(window=window, client=client, offset=state["token"])
@@ -55,19 +56,59 @@ class BiorxivCrossrefAdapter:
                 permanent_errors=errors,
             )
 
-        next_state: _CursorState = {
-            "consumed": state["consumed"] + len(items),
-            "page": state["page"] + 1,
-            "provider": provider,
-            "token": next_token,
-        }
-        next_cursor = _encode_cursor(next_state)
+        if provider == _CROSSREF:
+            consumed = state["consumed"] + (0 if state["local_index"] else len(items))
+            page = state["page"] + (0 if state["local_index"] else 1)
+            remaining_records = _remaining_records(
+                filtered_records,
+                local_index=state["local_index"],
+                provider=provider,
+                cursor=cursor,
+            )
+            page_records = remaining_records[: config.max_results]
+            next_cursor: str | None
+            if len(remaining_records) > len(page_records):
+                next_cursor = _encode_cursor(
+                    {
+                        "consumed": consumed,
+                        "local_index": state["local_index"] + len(page_records),
+                        "page": page,
+                        "provider": provider,
+                        "token": state["token"],
+                    }
+                )
+            elif next_token is not None:
+                next_cursor = _encode_cursor(
+                    {
+                        "consumed": consumed,
+                        "local_index": 0,
+                        "page": page,
+                        "provider": provider,
+                        "token": next_token,
+                    }
+                )
+            else:
+                next_cursor = None
+        else:
+            consumed = state["consumed"] + len(items)
+            page = state["page"] + 1
+            page_records = filtered_records[: config.max_results]
+            assert next_token is not None
+            next_cursor = _encode_cursor(
+                {
+                    "consumed": consumed,
+                    "local_index": 0,
+                    "page": page,
+                    "provider": provider,
+                    "token": next_token,
+                }
+            )
         capped = (
-            next_state["page"] >= config.max_pages
-            or next_state["consumed"] >= config.max_results
+            page >= config.max_pages
+            or consumed >= config.max_results
         )
         return FetchPage(
-            records=filtered_records[: config.max_results],
+            records=page_records,
             next_cursor=next_cursor,
             capped=capped,
             permanent_errors=errors,
@@ -76,6 +117,7 @@ class BiorxivCrossrefAdapter:
 
 class _CursorState(TypedDict):
     consumed: int
+    local_index: int
     page: int
     provider: str
     token: str
@@ -113,7 +155,7 @@ async def _fetch_crossref(
     client: RequestClient,
     page_size: int,
     cursor_value: str,
-) -> tuple[list[object], str]:
+) -> tuple[list[object], str | None]:
     text = await client.get_text(
         "https://api.crossref.org/works",
         {
@@ -138,7 +180,12 @@ async def _fetch_crossref(
     items = message.get("items")
     if not isinstance(items, list):
         raise InfrastructureError("invalid crossref payload: expected message.items list")
-    next_cursor = _clean(str(message.get("next-cursor") or cursor_value)) or cursor_value
+    next_cursor_value = message.get("next-cursor")
+    next_cursor = (
+        _clean(next_cursor_value) or None
+        if isinstance(next_cursor_value, str)
+        else None
+    )
     return items, next_cursor
 
 
@@ -151,6 +198,7 @@ def _decode_cursor(cursor: str | None, *, provider: str) -> _CursorState:
     if cursor is None:
         return {
             "consumed": 0,
+            "local_index": 0,
             "page": 0,
             "provider": provider,
             "token": "0" if provider == _BIORXIV else "*",
@@ -166,21 +214,26 @@ def _decode_cursor(cursor: str | None, *, provider: str) -> _CursorState:
         raise InfrastructureError(f"invalid {provider} continuation cursor: {cursor}")
 
     consumed = data.get("consumed")
+    local_index = data.get("local_index", 0)
     page = data.get("page")
     encoded_provider = data.get("provider")
     token = _clean(str(data.get("token") or ""))
     if (
         not isinstance(consumed, int)
         or consumed < 0
+        or not isinstance(local_index, int)
+        or local_index < 0
         or not isinstance(page, int)
         or page < 0
         or encoded_provider != provider
         or not token
         or (provider == _BIORXIV and not token.isdigit())
+        or (provider == _BIORXIV and local_index != 0)
     ):
         raise InfrastructureError(f"invalid {provider} continuation cursor: {cursor}")
     return {
         "consumed": consumed,
+        "local_index": local_index,
         "page": page,
         "provider": provider,
         "token": token,
@@ -317,6 +370,20 @@ def _crossref_authors(value: object) -> tuple[str, ...]:
         if author:
             authors.append(author)
     return tuple(authors)
+
+
+def _remaining_records(
+    records: tuple[SourceRecord, ...],
+    *,
+    local_index: int,
+    provider: str,
+    cursor: str | None,
+) -> tuple[SourceRecord, ...]:
+    if local_index > len(records):
+        raise InfrastructureError(
+            f"invalid {provider} continuation cursor: {cursor or '<initial>'}"
+        )
+    return records[local_index:]
 
 
 def _links(value: object) -> tuple[str, str]:

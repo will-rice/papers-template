@@ -57,3 +57,49 @@
 ## Concerns
 
 - `uv run pytest -q` at the repository root still reports the pre-existing Copier `DirtyLocalWarning` warnings; Task 9 does not introduce new warnings.
+
+---
+
+## 2026-09-23 Cursor termination findings
+
+### RED
+
+- Added failing regression coverage for:
+  - Papers With Code final non-empty pages with `next: null` and blank `next`
+  - Crossref final non-empty pages with missing and blank `message.next-cursor`
+  - final-page local truncation for both adapters, proving resumable continuation without skipped or duplicated records
+- Verified red with:
+  - `cd template && PYTHONPATH=src uv run --project .. pytest tests/adapters/test_biorxiv_crossref.py tests/adapters/test_papers_with_code.py -q`
+- Initial failures showed both adapters preserving/reusing their current continuation state on exhausted pages, and local truncation replaying the first record instead of resuming within the page.
+
+### GREEN
+
+- Updated `PapersWithCodeAdapter` to:
+  - treat `next: null` and blank `next` as end-of-enumeration
+  - keep a continuation cursor only when a real API next URL exists or local intra-page truncation must resume
+  - resume final-page local truncation from an intra-page index instead of re-emitting earlier records
+- Updated `BiorxivCrossrefAdapter` Crossref handling to:
+  - treat missing/blank `message.next-cursor` as complete enumeration
+  - preserve a cursor only for a real next cursor token or a local intra-page resume point
+  - resume final-page local truncation from an intra-page index without skip/duplicate behavior
+- Left bioRxiv behavior unchanged.
+
+### Validation
+
+- Focused affected adapters:
+  - `cd template && PYTHONPATH=src uv run --project .. pytest tests/adapters/test_biorxiv_crossref.py tests/adapters/test_papers_with_code.py -q` → `29 passed`
+- All adapter suites:
+  - `cd template && PYTHONPATH=src uv run --project .. pytest tests/adapters -q` → `79 passed`
+- Full template suite:
+  - `cd template && PYTHONPATH=src uv run --project .. pytest -q` → `129 passed`
+- Ruff:
+  - `cd template && PYTHONPATH=src uv run --project .. ruff check src tests` → `All checks passed!`
+- Mypy:
+  - `cd template && PYTHONPATH=src uv run --project .. mypy src/papers_pipeline/adapters/biorxiv_crossref.py src/papers_pipeline/adapters/papers_with_code.py tests/adapters/test_biorxiv_crossref.py tests/adapters/test_papers_with_code.py tests/conftest.py` → `Success: no issues found in 5 source files`
+  - `cd template && PYTHONPATH=src uv run --project .. mypy src tests` still reports the repository's pre-existing unrelated typing issues in `tests/test_state_inventory.py`, `tests/test_normalize_topics.py`, `tests/test_config.py`, `tests/test_fixture_transport.py`, and `tests/test_http.py`
+- Root repository smoke suite:
+  - `uv run pytest -q` → `2 passed, 2 warnings` (existing Copier dirty-template warnings)
+
+### Concerns
+
+- Full-repository `mypy src tests` is still blocked by pre-existing unrelated typing failures outside the changed Task 9 surface.

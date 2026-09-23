@@ -120,6 +120,71 @@ async def test_crossref_uses_opaque_cursor_and_prefers_html_conversion_input(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client_fixture",
+    [
+        "crossref_last_missing_next_cursor_client",
+        "crossref_last_blank_next_cursor_client",
+    ],
+)
+async def test_crossref_last_non_empty_page_without_next_cursor_stops_enumeration(
+    client_fixture: str,
+    request: pytest.FixtureRequest,
+    crossref_config: AdapterConfig,
+) -> None:
+    client = cast(RequestClient, request.getfixturevalue(client_fixture))
+
+    page = await BiorxivCrossrefAdapter().fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=None,
+        client=client,
+        config=crossref_config,
+    )
+
+    assert len(page.records) == 1
+    assert page.next_cursor is None
+    assert page.capped is False
+
+
+@pytest.mark.asyncio
+async def test_crossref_local_truncation_on_final_page_resumes_without_skip_or_duplicate(
+    crossref_last_local_truncation_client: RequestClient,
+    crossref_config: AdapterConfig,
+) -> None:
+    adapter = BiorxivCrossrefAdapter()
+    config = crossref_config.model_copy(update={"page_size": 2, "max_results": 1})
+
+    first_page = await adapter.fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=None,
+        client=crossref_last_local_truncation_client,
+        config=config,
+    )
+    second_page = await adapter.fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=first_page.next_cursor,
+        client=crossref_last_local_truncation_client,
+        config=config,
+    )
+
+    assert tuple(record.source_id for record in first_page.records) == ("10.1000/fixture-local-1",)
+    assert first_page.next_cursor
+    assert first_page.capped is True
+    assert tuple(record.source_id for record in second_page.records) == ("10.1000/fixture-local-2",)
+    assert second_page.next_cursor is None
+    assert second_page.capped is True
+
+
+@pytest.mark.asyncio
 async def test_crossref_partial_dates_default_missing_month_and_day(
     crossref_client: RequestClient,
     crossref_config: AdapterConfig,
