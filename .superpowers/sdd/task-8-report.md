@@ -53,3 +53,52 @@
 ## Concerns
 
 - `uv run pytest -q` at the repository root still emits pre-existing Copier dirty-template warnings; they do not come from Task 8 changes.
+
+---
+
+## Task 8 findings follow-up
+
+**Status:** complete
+
+## RED
+
+- Added focused failing coverage before changing implementation:
+  - `test_dblp_same_year_record_is_included_for_exact_day_window`
+  - `test_dblp_outside_year_record_is_excluded`
+  - `test_semantic_scholar_prefers_returned_next_offset_for_sparse_pages`
+- Added sparse Semantic Scholar fixture:
+  - `template/tests/fixtures/adapters/semantic_scholar/page-sparse-next.json`
+- Red command:
+  - `cd template && PYTHONPATH=src uv run --project .. pytest tests/adapters/test_semantic_scholar.py tests/adapters/test_dblp.py -q`
+- Observed failures before the fix:
+  - DBLP exact-day filtering dropped a 2024 record from a September 2024 window because the adapter synthesized `2024-01-01`
+  - Semantic Scholar synthesized the next offset as `1` instead of honoring API-returned `next=100`
+
+## GREEN
+
+- Updated `DblpAdapter` window filtering to compare publication year against the fetch window's start/end years, preserving same-year inclusion while excluding out-of-year records.
+- Updated `SemanticScholarAdapter` to:
+  - parse the API payload's `next` continuation value
+  - preserve `consumed` separately for `max_results` accounting
+  - keep the cursor opaque while storing the request offset/token as a normalized string
+  - fall back to synthesized numeric offsets only when the API omits `next`
+- Kept page-count and source-consumed cap semantics unchanged.
+
+## Validation
+
+- Focused adapter suite:
+  - `cd template && PYTHONPATH=src uv run --project .. pytest tests/adapters/test_semantic_scholar.py tests/adapters/test_dblp.py -q` → `24 passed`
+- Full template suite:
+  - `cd template && PYTHONPATH=src uv run --project .. pytest -q` → `98 passed`
+- Root repository suite:
+  - `uv run pytest -q` → `2 passed, 2 warnings` (existing Copier dirty-template warnings)
+- Ruff:
+  - `cd template && PYTHONPATH=src uv run --project .. ruff check src tests` → `All checks passed!`
+- Targeted changed-surface mypy:
+  - `cd template && PYTHONPATH=src uv run --project .. mypy src/papers_pipeline/adapters/semantic_scholar.py src/papers_pipeline/adapters/dblp.py tests/conftest.py tests/adapters/test_semantic_scholar.py tests/adapters/test_dblp.py` → `Success: no issues found in 5 source files`
+- Full template mypy:
+  - `cd template && PYTHONPATH=src uv run --project .. mypy src tests` → still fails on pre-existing issues in unrelated files (`tests/test_state_inventory.py`, `tests/test_normalize_topics.py`, `tests/test_config.py`, `tests/test_fixture_transport.py`, `tests/test_http.py`, `tests/adapters/test_contract.py`)
+
+## Concerns
+
+- Full-project mypy remains red because of pre-existing unrelated strict-typing issues outside the Task 8 files.

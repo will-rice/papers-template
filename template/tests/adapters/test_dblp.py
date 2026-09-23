@@ -148,6 +148,42 @@ async def test_dblp_record_fields_normalize_correctly(
 
 
 @pytest.mark.asyncio
+async def test_dblp_same_year_record_is_included_for_exact_day_window(
+    dblp_client: RequestClient,
+    dblp_config: AdapterConfig,
+) -> None:
+    page = await DblpAdapter().fetch(
+        window=FetchWindow(
+            start=datetime(2024, 9, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 9, 7, tzinfo=timezone.utc),
+        ),
+        cursor=None,
+        client=dblp_client,
+        config=dblp_config,
+    )
+
+    assert tuple(record.source_id for record in page.records) == ("conf/test/Fixture24",)
+
+
+@pytest.mark.asyncio
+async def test_dblp_outside_year_record_is_excluded(
+    dblp_client: RequestClient,
+    dblp_config: AdapterConfig,
+) -> None:
+    page = await DblpAdapter().fetch(
+        window=FetchWindow(
+            start=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2025, 1, 7, tzinfo=timezone.utc),
+        ),
+        cursor=None,
+        client=dblp_client,
+        config=dblp_config,
+    )
+
+    assert page.records == ()
+
+
+@pytest.mark.asyncio
 async def test_dblp_keeps_valid_records_and_surfaces_missing_conversion_input(
     dblp_malformed_client: RequestClient,
     dblp_config: AdapterConfig,

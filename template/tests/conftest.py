@@ -625,6 +625,32 @@ def semantic_scholar_malformed_only_client(
 
 
 @pytest.fixture
+def semantic_scholar_sparse_next_client(
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> RecordedRequestClient:
+    return _recording_request_client(
+        config=fetch_config,
+        routes={
+            _semantic_scholar_route(
+                offset=0,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-sparse-next.json",
+            },
+            _semantic_scholar_route(
+                offset=100,
+                page_size=semantic_scholar_config.page_size,
+                query="speech recognition",
+            ): {
+                "fixture": "adapters/semantic_scholar/page-2.json",
+            },
+        },
+    )
+
+
+@pytest.fixture
 def dblp_config() -> AdapterConfig:
     return AdapterConfig(
         name="dblp",

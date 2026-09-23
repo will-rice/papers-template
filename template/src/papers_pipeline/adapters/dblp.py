@@ -37,9 +37,7 @@ class DblpAdapter:
         )
         hits = _payload_hits(text)
         parsed_records, errors = collect_records(hits, self._record)
-        records = tuple(
-            record for record in parsed_records if window.start <= record.published <= window.end
-        )
+        records = tuple(record for record in parsed_records if _within_window(record, window))
         if not hits:
             return FetchPage(
                 records=records,
@@ -88,6 +86,10 @@ class DblpAdapter:
             input_url=input_url,
             doi=_first_text(info.get("doi")),
         )
+
+
+def _within_window(record: SourceRecord, window: FetchWindow) -> bool:
+    return window.start.year <= record.published.year <= window.end.year
 
 
 def _payload_hits(text: str) -> list[object]:

@@ -4,6 +4,7 @@ import base64
 import json
 import re
 from datetime import datetime, timezone
+from typing import TypedDict
 
 from papers_pipeline.adapters.base import FetchPage, FetchWindow, collect_records
 from papers_pipeline.config import AdapterConfig
@@ -32,7 +33,7 @@ class SemanticScholarAdapter:
             "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
             {
                 "query": config.filters.get("query", "*"),
-                "offset": str(state["offset"]),
+                "offset": state["offset"],
                 "limit": str(config.page_size),
                 "fields": (
                     "paperId,title,abstract,authors,publicationDate,url,"
@@ -41,7 +42,7 @@ class SemanticScholarAdapter:
             },
             {"x-api-key": self.api_key},
         )
-        items = _payload_items(text)
+        items, next_offset = _payload_page(text)
         parsed_records, errors = collect_records(items, self._record)
         records = tuple(
             record for record in parsed_records if window.start <= record.published <= window.end
@@ -54,9 +55,13 @@ class SemanticScholarAdapter:
                 permanent_errors=errors,
             )
 
-        next_state = {
+        next_state: _CursorState = {
             "consumed": state["consumed"] + len(items),
-            "offset": state["offset"] + len(items),
+            "offset": _next_offset(
+                current_offset=state["offset"],
+                payload_next=next_offset,
+                item_count=len(items),
+            ),
             "page": state["page"] + 1,
         }
         next_cursor = _encode_cursor(next_state)
@@ -101,7 +106,13 @@ class SemanticScholarAdapter:
         )
 
 
-def _payload_items(text: str) -> list[object]:
+class _CursorState(TypedDict):
+    consumed: int
+    offset: str
+    page: int
+
+
+def _payload_page(text: str) -> tuple[list[object], object]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as error:
@@ -111,17 +122,17 @@ def _payload_items(text: str) -> list[object]:
     items = payload.get("data")
     if not isinstance(items, list):
         raise InfrastructureError("invalid semantic_scholar payload: expected data list")
-    return items
+    return items, payload.get("next")
 
 
-def _encode_cursor(state: dict[str, int]) -> str:
+def _encode_cursor(state: _CursorState) -> str:
     payload = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: str | None) -> dict[str, int]:
+def _decode_cursor(cursor: str | None) -> _CursorState:
     if cursor is None:
-        return {"consumed": 0, "offset": 0, "page": 0}
+        return {"consumed": 0, "offset": "0", "page": 0}
 
     padding = "=" * (-len(cursor) % 4)
     try:
@@ -137,16 +148,39 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
     consumed = data.get("consumed")
     offset = data.get("offset")
     page = data.get("page")
+    normalized_offset: str
+    if isinstance(offset, int) and offset >= 0:
+        normalized_offset = str(offset)
+    elif isinstance(offset, str) and offset:
+        normalized_offset = _clean(offset)
+    else:
+        normalized_offset = ""
     if (
         not isinstance(consumed, int)
         or consumed < 0
-        or not isinstance(offset, int)
-        or offset < 0
+        or not normalized_offset
         or not isinstance(page, int)
         or page < 0
     ):
         raise InfrastructureError(f"invalid semantic_scholar continuation cursor: {cursor}")
-    return {"consumed": consumed, "offset": offset, "page": page}
+    return {"consumed": consumed, "offset": normalized_offset, "page": page}
+
+
+def _next_offset(*, current_offset: str, payload_next: object, item_count: int) -> str:
+    if isinstance(payload_next, int) and payload_next >= 0:
+        return str(payload_next)
+
+    if isinstance(payload_next, str):
+        next_offset = _clean(payload_next)
+        if next_offset:
+            return next_offset
+
+    try:
+        return str(int(current_offset) + item_count)
+    except ValueError as error:
+        raise InfrastructureError(
+            "invalid semantic_scholar payload: expected next continuation token"
+        ) from error
 
 
 def _required_pdf_url(value: object, *, identifier: str) -> str:

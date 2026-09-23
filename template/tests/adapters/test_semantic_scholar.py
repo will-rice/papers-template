@@ -144,6 +144,38 @@ async def test_semantic_scholar_record_fields_normalize_correctly(
 
 
 @pytest.mark.asyncio
+async def test_semantic_scholar_prefers_returned_next_offset_for_sparse_pages(
+    semantic_scholar_sparse_next_client: RequestClient,
+    semantic_scholar_config: AdapterConfig,
+) -> None:
+    adapter = SemanticScholarAdapter(api_key="secret")
+    recording_client = cast(Any, semantic_scholar_sparse_next_client)
+    first_page = await adapter.fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=None,
+        client=recording_client,
+        config=semantic_scholar_config,
+    )
+
+    second_page = await adapter.fetch(
+        window=FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        cursor=first_page.next_cursor,
+        client=recording_client,
+        config=semantic_scholar_config,
+    )
+
+    assert tuple(record.source_id for record in first_page.records) == ("abc123",)
+    assert tuple(record.source_id for record in second_page.records) == ("abc124",)
+    assert recording_client.requests[1].url.params["offset"] == "100"
+
+
+@pytest.mark.asyncio
 async def test_semantic_scholar_keeps_valid_records_and_surfaces_malformed_entries(
     semantic_scholar_malformed_client: RequestClient,
     semantic_scholar_config: AdapterConfig,
