@@ -10,9 +10,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+import httpx
 
 from papers_pipeline.batching import Batch, expected_markdown, infer_backlog
-from papers_pipeline.config import ConcurrencyConfig
+from papers_pipeline.adapters.arxiv import ArxivAdapter
+from papers_pipeline.adapters.base import FetchWindow
+from papers_pipeline.config import AdapterConfig, ConcurrencyConfig
 from papers_pipeline.convert import (
     CommandRunner,
     DownloadingMaterializer,
@@ -21,6 +24,7 @@ from papers_pipeline.convert import (
     _download_bytes,
 )
 from papers_pipeline.errors import InfrastructureError, PaperError
+from papers_pipeline.http import RequestClient
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
 
 NOW = datetime(2026, 9, 23, 2, 0, tzinfo=timezone.utc)
@@ -267,6 +271,42 @@ async def test_downloading_materializer_materializes_remote_input_to_local_file(
     assert result.local_path.is_absolute()
     assert result.local_path.parent == tmp_path / "inputs"
     assert result.cleanup_paths == (result.local_path,)
+
+
+@pytest.mark.asyncio
+async def test_arxiv_adapter_pdf_url_downloads_without_redirect(
+    arxiv_client: RequestClient,
+    arxiv_config: AdapterConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = await ArxivAdapter().fetch(
+        FetchWindow(
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        ),
+        None,
+        arxiv_client,
+        arxiv_config,
+    )
+    adapter_url = page.records[0].input_url
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == adapter_url:
+            return httpx.Response(200, content=b"%PDF fixture")
+        if str(request.url) == f"{adapter_url}.pdf":
+            return httpx.Response(302, headers={"location": adapter_url})
+        raise AssertionError(f"unexpected URL: {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "papers_pipeline.convert.httpx.AsyncClient",
+        lambda **kwargs: original_client(transport=transport, **kwargs),
+    )
+
+    assert await _download_bytes(adapter_url, 1) == b"%PDF fixture"
+    with pytest.raises(InfrastructureError, match="redirect HTTP 302"):
+        await _download_bytes(f"{adapter_url}.pdf", 1)
 
 
 @pytest.mark.asyncio

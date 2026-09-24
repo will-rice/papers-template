@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from xml.etree import ElementTree
 
 from papers_pipeline.adapters.base import FetchPage, FetchWindow, collect_records
@@ -31,10 +31,13 @@ class ArxivAdapter:
         text = await client.get_text(
             "https://export.arxiv.org/api/query",
             {
-                "search_query": config.filters.get("search_query", "all:*"),
+                "search_query": _windowed_query(
+                    config.filters.get("search_query", "all:*"), window
+                ),
                 "start": str(state["start"]),
                 "max_results": str(config.page_size),
                 "sortBy": "submittedDate",
+                "sortOrder": "ascending",
             },
             {},
         )
@@ -115,7 +118,7 @@ class ArxivAdapter:
             published=published,
             url=f"https://arxiv.org/abs/{identifier}",
             input_format="pdf",
-            input_url=f"https://arxiv.org/pdf/{identifier}.pdf",
+            input_url=f"https://arxiv.org/pdf/{identifier}",
             categories=categories,
         )
 
@@ -195,3 +198,9 @@ def _required_text(value: str, *, field: str, identifier: str) -> str:
 
 def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _windowed_query(query: str, window: FetchWindow) -> str:
+    start = window.start.astimezone(timezone.utc).strftime("%Y%m%d%H%M")
+    end = window.end.astimezone(timezone.utc).strftime("%Y%m%d%H%M")
+    return f"({query}) AND submittedDate:[{start} TO {end}]"

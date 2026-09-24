@@ -167,7 +167,10 @@ def _recording_request_client(
 def _arxiv_route(*, start: int, page_size: int, search_query: str) -> str:
     return (
         "https://export.arxiv.org/api/query"
-        f"?search_query={search_query}&start={start}&max_results={page_size}&sortBy=submittedDate"
+        f"?search_query=%28{search_query}%29+AND+"
+        "submittedDate%3A%5B202401010000+TO+202401080000%5D"
+        f"&start={start}&max_results={page_size}"
+        "&sortBy=submittedDate&sortOrder=ascending"
     )
 
 

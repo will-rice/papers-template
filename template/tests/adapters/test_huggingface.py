@@ -133,7 +133,7 @@ async def test_huggingface_record_fields_normalize_correctly(
     assert record.authors == ("A. Author",)
     assert record.categories == ()
     assert record.url == "https://huggingface.co/papers/2401.00001"
-    assert record.input_url == "https://arxiv.org/pdf/2401.00001.pdf"
+    assert record.input_url == "https://arxiv.org/pdf/2401.00001"
     assert paper.identifier == "arxiv:2401.00001"
 
 

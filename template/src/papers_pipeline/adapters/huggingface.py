@@ -121,7 +121,7 @@ class HuggingFaceAdapter:
             published=published,
             url=f"https://huggingface.co/papers/{identifier}",
             input_format="pdf",
-            input_url=f"https://arxiv.org/pdf/{identifier}.pdf",
+            input_url=f"https://arxiv.org/pdf/{identifier}",
             categories=categories,
         )
 

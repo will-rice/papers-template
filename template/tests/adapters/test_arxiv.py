@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
+import httpx
 import pytest
 
 from papers_pipeline.adapters.arxiv import ArxivAdapter
 from papers_pipeline.adapters.base import FetchWindow
+from papers_pipeline.config import AdapterConfig, FetchConfig
 from papers_pipeline.errors import InfrastructureError
-from papers_pipeline.http import RequestClient
+from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.normalize import normalize
-from papers_pipeline.config import AdapterConfig
 
 from .contract import assert_adapter_contract
 
@@ -126,7 +128,7 @@ async def test_arxiv_record_fields_normalize_correctly(
     assert record.authors == ("A. Author",)
     assert record.categories == ("cs.CL",)
     assert record.url == "https://arxiv.org/abs/2401.00001"
-    assert record.input_url == "https://arxiv.org/pdf/2401.00001.pdf"
+    assert record.input_url == "https://arxiv.org/pdf/2401.00001"
     assert paper.identifier == "arxiv:2401.00001"
 
 
@@ -218,3 +220,50 @@ async def test_arxiv_invalid_atom_page_is_infrastructure_failure(
             client=arxiv_invalid_xml_client,
             config=arxiv_config,
         )
+
+
+@pytest.mark.asyncio
+async def test_arxiv_remote_query_is_bound_to_window_and_stable_across_resume(
+    fetch_config: FetchConfig,
+    arxiv_config: AdapterConfig,
+) -> None:
+    requests: list[httpx.Request] = []
+    fixtures = Path(__file__).parents[1] / "fixtures" / "adapters" / "arxiv"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        start = request.url.params["start"]
+        fixture = "page.xml" if start == "0" else "page-2.xml"
+        return httpx.Response(200, text=(fixtures / fixture).read_text())
+
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(fetch_config.total_deadline_seconds),
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = ArxivAdapter()
+    window = FetchWindow(
+        start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+    )
+
+    first = await adapter.fetch(window, None, client, arxiv_config)
+    second = await adapter.fetch(window, first.next_cursor, client, arxiv_config)
+
+    expected_query = (
+        "(cat:cs.CL) AND submittedDate:[202401010000 TO 202401080000]"
+    )
+    assert [request.url.params["search_query"] for request in requests] == [
+        expected_query,
+        expected_query,
+    ]
+    assert [request.url.params["sortBy"] for request in requests] == [
+        "submittedDate",
+        "submittedDate",
+    ]
+    assert [request.url.params["sortOrder"] for request in requests] == [
+        "ascending",
+        "ascending",
+    ]
+    assert [request.url.params["start"] for request in requests] == ["0", "2"]
+    assert tuple(record.source_id for record in second.records) == ("2401.00002",)
