@@ -8,6 +8,7 @@ from papers_pipeline.config import AdapterConfig
 from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.config import FetchConfig
+from conftest import FixtureTransport
 from papers_pipeline.normalize import normalize
 
 from .contract import assert_adapter_contract
@@ -230,13 +231,11 @@ async def test_huggingface_invalid_json_page_is_infrastructure_failure(
 
 @pytest.mark.asyncio
 async def test_huggingface_enumerates_each_utc_date_and_resumes_mid_range(
-    fixture_transport: object,
+    fixture_transport: FixtureTransport,
     fetch_config: FetchConfig,
     huggingface_config: AdapterConfig,
 ) -> None:
-    build_transport = fixture_transport
-    assert callable(build_transport)
-    transport = build_transport(
+    transport = fixture_transport(
         {
             "https://huggingface.co/api/daily_papers?date=2024-01-08&p=0&limit=2": {
                 "fixture": "adapters/huggingface/empty.json"

@@ -82,9 +82,7 @@ def test_deduplicate_merges_arxiv_versions_keeping_existing_identifier(
         source_record.model_copy(update={"source": "arxiv", "arxiv_id": "2401.12345"})
     )
     refetched = normalize(
-        source_record.model_copy(
-            update={"source": "arxiv", "arxiv_id": "2401.12345v2"}
-        )
+        source_record.model_copy(update={"source": "arxiv", "arxiv_id": "2401.12345v2"})
     )
 
     assert deduplicate([refetched, existing]) == [existing]

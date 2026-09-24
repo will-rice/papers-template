@@ -1,3 +1,4 @@
+import dataclasses
 import subprocess
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -8,13 +9,15 @@ import pytest
 import yaml
 
 import papers_pipeline.cli as cli
-from papers_pipeline.adapters.base import FetchPage, FetchWindow
+from papers_pipeline.adapters.base import FetchPage
 from papers_pipeline.convert import (
     CommandRunner,
     InputMaterializer,
 )
 from papers_pipeline.errors import ConfigError, InfrastructureError, PaperError
 from papers_pipeline.git import GitRepository
+from papers_pipeline.config import FetchConfig
+from papers_pipeline.http import RequestClient
 from papers_pipeline.models import SourceRecord
 from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
 from papers_pipeline.state import load_state
@@ -49,7 +52,6 @@ def record(identifier: str) -> SourceRecord:
 class FakeAdapter:
     name = "arxiv"
     record_sources = frozenset({"arxiv"})
-    window_type = FetchWindow
 
     def __init__(
         self,
@@ -68,16 +70,6 @@ class FakeAdapter:
             next_cursor=None,
             capped=self.capped,
         )
-
-
-class FakeClient:
-    events: list[str] = []
-
-    async def __aenter__(self) -> "FakeClient":
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
-        return None
 
 
 class FakeMaterializer(InputMaterializer):
@@ -196,6 +188,11 @@ def make_paths(
     )
 
 
+FETCH_CONFIG = FetchConfig(
+    request_timeout_seconds=30, retries=0, backoff_seconds=0, total_deadline_seconds=900
+)
+
+
 def dependencies(
     adapter: FakeAdapter,
     runner: FakeRunner,
@@ -204,7 +201,8 @@ def dependencies(
     return Dependencies(
         environ={},
         adapters={"arxiv": adapter},
-        client_factory=lambda _deadline: FakeClient(),  # type: ignore[arg-type,return-value]
+        # FakeAdapter never sends requests; the client only has to exist.
+        client_factory=lambda deadline: RequestClient(FETCH_CONFIG, deadline),
         materializer=FakeMaterializer(),
         runner=runner,
         git=git,
@@ -220,11 +218,8 @@ async def test_preflight_fails_before_fetch_or_mutation(tmp_path: Path) -> None:
     adapter = FakeAdapter([record("never-fetched")])
     git = RecordingGit()
     deps = dependencies(adapter, FakeRunner(), git)
-    deps = Dependencies(
-        **{
-            **deps.__dict__,
-            "tool_lookup": lambda name: None if name == "marker_single" else name,
-        }
+    deps = dataclasses.replace(
+        deps, tool_lookup=lambda name: None if name == "marker_single" else name
     )
 
     with pytest.raises(

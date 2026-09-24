@@ -12,11 +12,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "mypy>=1.17,<2",
   "pre-commit>=4.3,<5",
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<0.13",
+  "ty>=0.0.84,<0.1",
   "types-PyYAML>=6.0.12,<7",
 ]
 
@@ -31,11 +31,6 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 88
 target-version = "py312"
-
-[tool.mypy]
-python_version = "3.12"
-strict = true
-packages = ["papers_pipeline"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/papers_pipeline"]

@@ -8,6 +8,7 @@ import pytest
 from papers_pipeline.adapters.base import FetchPage, FetchWindow
 from papers_pipeline.config import (
     AdapterConfig,
+    AdapterName,
     ConcurrencyConfig,
     ConversionConfig,
     FetchConfig,
@@ -102,7 +103,6 @@ class RecordingAdapter:
     pages: list[FetchPage] = field(default_factory=list)
     failure: InfrastructureError | None = None
     record_sources: frozenset[str] = field(default_factory=lambda: frozenset({"stub"}))
-    window_type: type[FetchWindow] = FetchWindow
     windows: list[FetchWindow] = field(default_factory=list)
     cursors: list[str | None] = field(default_factory=list)
     clients: list[RequestClient] = field(default_factory=list)
@@ -127,7 +127,7 @@ class RecordingAdapter:
 
 
 def adapter_config(
-    name: str,
+    name: AdapterName,
     *,
     lookback_days: int,
     page_size: int = 2,
@@ -136,7 +136,7 @@ def adapter_config(
     enabled: bool = True,
 ) -> AdapterConfig:
     return AdapterConfig(
-        name=name,  # type: ignore[arg-type]
+        name=name,
         enabled=enabled,
         lookback_days=lookback_days,
         page_size=page_size,

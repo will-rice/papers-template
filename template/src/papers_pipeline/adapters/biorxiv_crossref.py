@@ -17,7 +17,6 @@ _CROSSREF = "crossref"
 class BiorxivCrossrefAdapter:
     name = "biorxiv_crossref"
     record_sources = frozenset({_BIORXIV, _CROSSREF})
-    window_type = FetchWindow
 
     async def fetch(
         self,
