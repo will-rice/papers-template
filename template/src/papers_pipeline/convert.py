@@ -320,7 +320,7 @@ async def convert_batch(
                 continue
 
             marker = expected_markdown(root, result.paper).with_suffix(".fixme.txt")
-            _write_fixme(
+            write_fixme(
                 marker,
                 identifier=result.paper.identifier,
                 latest_error=result.error,
@@ -398,13 +398,14 @@ def _promote_successes(
     return tuple(succeeded)
 
 
-def _write_fixme(
+def write_fixme(
     path: Path,
     *,
     identifier: str,
     latest_error: str,
     attempts: list[FailureAttempt],
 ) -> None:
+    """Write the marker that blocks a paper from conversion until removed."""
     _atomic_write_text(
         path,
         "\n".join(

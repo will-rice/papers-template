@@ -36,6 +36,13 @@ full clone, against an immutable template release:
    and deduplication, `git mv`s each paper to the path the pipeline expects,
    rewrites in-corpus links, replaces legacy front matter with the pipeline's,
    removes legacy indexes, and writes an empty `.papers-state.yml`.
+   Papers without markdown get inputs the nightly can convert: arXiv and
+   bioRxiv PDFs derived offline, legacy URLs ending in `.pdf` as PDFs, and,
+   for Semantic Scholar landing pages, one Graph API batch lookup per 500
+   papers that prefers the arXiv PDF, then the open-access PDF. Papers with
+   neither get a `.fixme.txt` marker, so the nightly counts them as blocked.
+   The lookup needs network access; set `SEMANTIC_SCHOLAR_API_KEY` to send
+   an API key, since an unauthenticated HTTP 429 aborts the migration.
 3. Remove every tracked legacy file the template does not render, keeping
    `papers/`, `papers.csv`, `.papers-state.yml`, and `LICENSE`.
 4. Port the legacy topic and source settings into `papers.yml`, then run
