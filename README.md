@@ -34,8 +34,8 @@ full clone, against an immutable template release:
    `uv run python <template>/scripts/migrate_legacy_corpus.py`. It converts
    `papers.csv` to the template schema with the pipeline's own normalization
    and deduplication, `git mv`s each paper to the path the pipeline expects,
-   rewrites in-corpus links, removes legacy indexes, and writes an empty
-   `.papers-state.yml`.
+   rewrites in-corpus links, replaces legacy front matter with the pipeline's,
+   removes legacy indexes, and writes an empty `.papers-state.yml`.
 3. Remove every tracked legacy file the template does not render, keeping
    `papers/`, `papers.csv`, `.papers-state.yml`, and `LICENSE`.
 4. Port the legacy topic and source settings into `papers.yml`, then run

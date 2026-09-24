@@ -10,8 +10,8 @@ submitted,categories,url,abstract[,source]`` and markdown at
 
 It rewrites ``papers.csv`` in the template schema, ``git mv``s every legacy
 markdown file to the path the pipeline expects, rewrites in-corpus links,
-removes the legacy per-year indexes, and writes an empty
-``.papers-state.yml``. Identifiers come from the pipeline's own
+replaces legacy front matter with the pipeline's, removes the legacy
+per-year indexes, and writes an empty ``.papers-state.yml``. Identifiers come from the pipeline's own
 ``normalize`` and ``deduplicate``, so the first nightly run sees the corpus
 as already generated.
 """
@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from papers_pipeline.batching import expected_markdown, infer_backlog
+from papers_pipeline.front_matter import write_front_matter
 from papers_pipeline.inventory import write_inventory
 from papers_pipeline.models import Paper, PipelineState, SourceRecord
 from papers_pipeline.normalize import clean, deduplicate, normalize
@@ -100,6 +101,9 @@ def main() -> None:
         year.rmdir()
 
     write_inventory(root / "papers.csv", papers)
+    # Replace legacy front matter with the pipeline's, so every paper is
+    # self-describing in one format.
+    write_front_matter(root, papers)
     save_state(root / ".papers-state.yml", PipelineState())
 
     backlog = infer_backlog(papers, root)

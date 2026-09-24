@@ -5,6 +5,7 @@ import pytest
 
 from migrate_legacy_corpus import main
 from papers_pipeline.batching import expected_markdown, infer_backlog
+from papers_pipeline.front_matter import with_front_matter
 from papers_pipeline.inventory import read_inventory
 from papers_pipeline.state import load_state
 
@@ -79,9 +80,10 @@ def test_migration_produces_generated_template_corpus(legacy_repo: Path) -> None
     text = expected_markdown(legacy_repo, converted).read_text(encoding="utf-8")
     scholar = expected_markdown(legacy_repo, by_identifier["semantic_scholar:abc123"])
     pending = expected_markdown(legacy_repo, by_identifier["arxiv:2401.00002"])
-    assert text == (
+    assert text == with_front_matter(
+        converted,
         f"Cites [scholar]({scholar.name}), [pending]({pending.name})"
-        f" and [same year]({pending.name}).\n"
+        f" and [same year]({pending.name}).\n",
     )
     assert load_state(legacy_repo / ".papers-state.yml").continuations == {}
     # Moves are staged as renames so history follows each paper.
