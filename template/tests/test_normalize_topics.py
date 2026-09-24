@@ -75,6 +75,21 @@ def test_dedupe_prefers_arxiv_then_doi_then_source(source_record: SourceRecord) 
     assert deduplicate([semantic, arxiv]) == [arxiv]
 
 
+def test_deduplicate_merges_arxiv_versions_keeping_existing_identifier(
+    source_record: SourceRecord,
+) -> None:
+    existing = normalize(
+        source_record.model_copy(update={"source": "arxiv", "arxiv_id": "2401.12345"})
+    )
+    refetched = normalize(
+        source_record.model_copy(
+            update={"source": "arxiv", "arxiv_id": "2401.12345v2"}
+        )
+    )
+
+    assert deduplicate([refetched, existing]) == [existing]
+
+
 def test_deduplicate_merges_bibliographic_fallback_without_strong_ids(
     source_record: SourceRecord,
 ) -> None:
