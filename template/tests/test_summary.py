@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from papers_pipeline.summary import RunSummary, SourceCounts, write_actions_summary

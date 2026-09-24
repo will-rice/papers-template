@@ -1,7 +1,5 @@
 """Command-line entrypoint for the papers pipeline."""
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 from datetime import datetime, timezone

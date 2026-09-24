@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import hashlib
 import locale
@@ -159,12 +157,6 @@ def _is_document_failure(returncode: int, output: str) -> bool:
     return any(pattern.search(output) for pattern in _DOCUMENT_FAILURE_PATTERNS)
 
 
-@dataclass(frozen=True)
-class MaterializedInput:
-    local_path: Path
-    cleanup_paths: tuple[Path, ...] = ()
-
-
 class DownloadingMaterializer:
     def __init__(
         self,
@@ -172,24 +164,26 @@ class DownloadingMaterializer:
     ) -> None:
         self._downloader = downloader or _download_bytes
 
-    async def materialize(self, paper: Paper, root: Path) -> MaterializedInput:
+    async def materialize(self, paper: Paper, root: Path) -> Path:
         # The downloader validates the URL scheme, host and resolved addresses.
         suffix = Path(urlsplit(paper.input_url).path).suffix or _default_suffix(paper)
         target = (
             root / "inputs" / f"{_materialized_name(paper, paper.input_url)}{suffix}"
         )
         payload = await self._downloader(paper.input_url, _DEFAULT_CONVERSION_TIMEOUT)
+        # root is the per-batch workspace, which is removed after the batch.
         try:
-            _atomic_write_bytes(target, payload)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
         except OSError as error:
             raise InfrastructureError(
                 f"conversion input cache write failed: {paper.input_url}"
             ) from error
-        return MaterializedInput(local_path=target, cleanup_paths=(target,))
+        return target
 
 
 class InputMaterializer(Protocol):
-    async def materialize(self, paper: Paper, root: Path) -> MaterializedInput: ...
+    async def materialize(self, paper: Paper, root: Path) -> Path: ...
 
 
 @dataclass(frozen=True)
@@ -242,24 +236,23 @@ async def convert_batch(
     }
 
     async def convert_one(paper: Paper) -> _PreparedConversion:
-        materialized: MaterializedInput | None = None
         try:
-            materialized = await materializer.materialize(paper, workspace)
+            input_path = await materializer.materialize(paper, workspace)
             staged_output = _staged_output_path(workspace, paper)
             async with semaphores[paper.input_format]:
                 if paper.input_format in {"html", "latex"}:
                     await runner.run(
-                        command_for(paper, materialized.local_path, staged_output),
+                        command_for(paper, input_path, staged_output),
                         timeout=timeout_seconds,
                     )
                 else:
                     marker_output_dir = _marker_output_dir(workspace, paper)
                     await runner.run(
-                        command_for(paper, materialized.local_path, marker_output_dir),
+                        command_for(paper, input_path, marker_output_dir),
                         timeout=timeout_seconds,
                     )
                     produced_markdown = _marker_markdown_path(
-                        marker_output_dir, materialized.local_path
+                        marker_output_dir, input_path
                     )
                     if not produced_markdown.exists():
                         raise InfrastructureError(
@@ -278,9 +271,6 @@ async def convert_batch(
             return _PreparedConversion(
                 paper=paper, staged_output=None, error=str(error)
             )
-        finally:
-            if materialized is not None:
-                _cleanup_paths(materialized.cleanup_paths)
 
     tasks = [asyncio.create_task(convert_one(paper)) for paper in batch.papers]
     results: list[_PreparedConversion] = []
@@ -431,24 +421,9 @@ def _atomic_write_text(path: Path, content: str) -> None:
     temporary.replace(path)
 
 
-def _atomic_write_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_bytes(content)
-    temporary.replace(path)
-
-
 def _atomic_move(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source.replace(destination)
-
-
-def _cleanup_paths(paths: Sequence[Path]) -> None:
-    for path in sorted(paths, key=lambda item: len(item.parts), reverse=True):
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-        else:
-            path.unlink(missing_ok=True)
 
 
 async def _cancel_pending(tasks: set[asyncio.Task[_PreparedConversion]]) -> None:

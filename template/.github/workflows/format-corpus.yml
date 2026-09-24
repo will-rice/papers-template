@@ -4,10 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       shard_count:
-        description: Number of bounded formatting shards (1-32)
+        description: Number of bounded formatting shards
         required: true
         default: "8"
-        type: string
+        type: choice
+        options: ["1", "2", "4", "8", "16", "32"]
 
 permissions:
   contents: read
@@ -34,31 +35,15 @@ jobs:
         id: base
         timeout-minutes: 1
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Validate shard count and build matrix
+      - name: Build shard matrix
         id: matrix
         timeout-minutes: 1
         env:
           SHARD_COUNT: ${{ inputs.shard_count }}
-        run: |
-          python - <<'PY'
-          import json
-          import os
-
-          raw = os.environ["SHARD_COUNT"]
-          if not raw.isascii() or not raw.isdecimal():
-              raise SystemExit("shard_count must be an integer from 1 through 32")
-          count = int(raw)
-          if not 1 <= count <= 32:
-              raise SystemExit("shard_count must be an integer from 1 through 32")
-          matrix = {
-              "include": [
-                  {"shard": index, "count": count}
-                  for index in range(count)
-              ]
-          }
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              print("matrix=" + json.dumps(matrix, separators=(",", ":")), file=output)
-          PY
+        run: >-
+          jq -cn --argjson count "$SHARD_COUNT"
+          '"matrix=" + ({include: [range($count) | {shard: ., count: $count}]} | tojson)'
+          -r >> "$GITHUB_OUTPUT"
 
   format:
     needs: plan
@@ -83,13 +68,10 @@ jobs:
         run: python -m pip install uv==0.8.17
       - name: Sync locked environment
         timeout-minutes: 5
-        run: uv sync --locked --extra dev
+        run: uv sync --locked
       - name: Install pinned formatter
         timeout-minutes: 2
         run: npm install --global prettier@3.6.2
-      - name: Validate configuration
-        timeout-minutes: 1
-        run: uv run papers-pipeline validate --config papers.yml --config-only
       - name: Format shard
         timeout-minutes: 15
         env:

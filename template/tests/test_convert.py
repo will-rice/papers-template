@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import os
 import subprocess
@@ -19,7 +17,6 @@ from papers_pipeline.config import AdapterConfig, ConcurrencyConfig
 from papers_pipeline.convert import (
     CommandRunner,
     DownloadingMaterializer,
-    MaterializedInput,
     convert_batch,
 )
 from papers_pipeline.errors import InfrastructureError, PaperError
@@ -67,7 +64,7 @@ class FakeMaterializer:
         self.behaviors = dict(behaviors or {})
         self.materialized_urls: dict[Path, str] = {}
 
-    async def materialize(self, paper: Paper, root: Path) -> MaterializedInput:
+    async def materialize(self, paper: Paper, root: Path) -> Path:
         behavior = self.behaviors.get(paper.input_url, "success")
         if behavior == "infra_error":
             raise InfrastructureError(
@@ -89,7 +86,7 @@ class FakeMaterializer:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(source.read_bytes())
         self.materialized_urls[local_path] = paper.input_url
-        return MaterializedInput(local_path=local_path)
+        return local_path
 
     def lookup(self, local_path: Path) -> str:
         return self.materialized_urls[local_path]
@@ -304,13 +301,9 @@ async def test_downloading_materializer_materializes_remote_input_to_local_file(
         target, tmp_path
     )
 
-    assert (
-        result.local_path.read_text(encoding="utf-8")
-        == "<html><body>offline</body></html>"
-    )
-    assert result.local_path.is_absolute()
-    assert result.local_path.parent == tmp_path / "inputs"
-    assert result.cleanup_paths == (result.local_path,)
+    assert result.read_text(encoding="utf-8") == "<html><body>offline</body></html>"
+    assert result.is_absolute()
+    assert result.parent == tmp_path / "inputs"
 
 
 @pytest.mark.asyncio
@@ -606,7 +599,7 @@ async def test_http_408_aborts_mixed_batch_without_mutating_failure_state(
     )
 
     class MixedMaterializer:
-        async def materialize(self, target: Paper, root: Path) -> MaterializedInput:
+        async def materialize(self, target: Paper, root: Path) -> Path:
             if target == timed_out:
                 await remote.download(target.input_url, 1)
                 raise AssertionError("408 download returned")

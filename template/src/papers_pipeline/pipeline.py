@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,7 +13,7 @@ from papers_pipeline.convert import (
     InputMaterializer,
     convert_batch,
 )
-from papers_pipeline.errors import CommitCompletedError, InfrastructureError
+from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.fetch import FetchResult, fetch_all
 from papers_pipeline.formatting import format_changed
 from papers_pipeline.git import GitOperations
@@ -131,8 +129,6 @@ async def run_nightly(
                         inventory_paths,
                         "chore: update paper inventory",
                     )
-            except CommitCompletedError:
-                raise
             except BaseException:
                 _rollback_files(
                     inventory_before,
@@ -221,8 +217,6 @@ async def run_nightly(
                             commit_paths,
                             f"chore: convert paper batch {batch_number}",
                         )
-            except CommitCompletedError:
-                raise
             except BaseException:
                 _rollback_files(batch_before, batch_paths, dependencies.git)
                 raise
@@ -297,8 +291,6 @@ def _managed_paths(paths: PipelinePaths) -> list[Path]:
         paths.state,
         paths.root / "README.md",
         paths.root / "papers",
-        paths.root / ".convert-batch",
-        paths.root / "inputs",
     ]
 
 

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path

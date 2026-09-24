@@ -1,15 +1,13 @@
-from __future__ import annotations
-
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-from papers_pipeline.errors import CommitCompletedError, InfrastructureError
+from papers_pipeline.errors import InfrastructureError
 
 
 class GitOperations(Protocol):
-    def commit(self, paths: Sequence[Path], message: str) -> str | None: ...
+    def commit(self, paths: Sequence[Path], message: str) -> None: ...
 
     def assert_clean(self, paths: Sequence[Path]) -> None: ...
 
@@ -20,7 +18,7 @@ class GitRepository:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
-    def commit(self, paths: Sequence[Path], message: str) -> str | None:
+    def commit(self, paths: Sequence[Path], message: str) -> None:
         relative = self._relative_paths(paths)
         if not relative:
             return None
@@ -44,10 +42,9 @@ class GitRepository:
                 check=False,
             )
             if changed.returncode == 0:
-                return None
+                return
             if changed.returncode != 1:
                 raise subprocess.CalledProcessError(changed.returncode, changed.args)
-            old_head = self._head_sha()
             subprocess.run(
                 ["git", "commit", "--only", "-m", message, "--", *relative],
                 cwd=self.root,
@@ -55,16 +52,6 @@ class GitRepository:
             )
         except (OSError, subprocess.CalledProcessError) as error:
             raise InfrastructureError(f"git commit failed: {message}") from error
-
-        try:
-            new_head = self._head_sha(fallback=True)
-            if new_head is None or new_head == old_head:
-                raise OSError("git commit completed but HEAD did not advance")
-            return new_head
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise CommitCompletedError(
-                f"git commit completed but its SHA could not be validated: {message}"
-            ) from error
 
     def assert_clean(self, paths: Sequence[Path]) -> None:
         relative = self._relative_paths(paths)
@@ -139,32 +126,6 @@ class GitRepository:
             check=False,
         )
         return result.returncode == 0
-
-    def _head_sha(self, *, fallback: bool = False) -> str | None:
-        try:
-            output = subprocess.check_output(
-                ["git", "rev-parse", "--verify", "HEAD"],
-                cwd=self.root,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-        except subprocess.CalledProcessError:
-            if not fallback:
-                return None
-            output = subprocess.check_output(
-                ["git", "log", "-1", "--format=%H", "HEAD"],
-                cwd=self.root,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-        sha = output.strip()
-        if len(sha) not in (40, 64):
-            raise OSError("git returned an invalid commit SHA")
-        try:
-            int(sha, 16)
-        except ValueError as error:
-            raise OSError("git returned an invalid commit SHA") from error
-        return sha
 
     def _relative_paths(self, paths: Sequence[Path]) -> list[str]:
         relative: set[str] = set()

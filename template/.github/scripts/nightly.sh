@@ -7,21 +7,13 @@ git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 pipeline_status=0
 uv run papers-pipeline nightly --config papers.yml || pipeline_status=$?
 
-managed_paths=(
-  "papers"
-  "papers.csv"
-  ".papers-state.yml"
-  "README.md"
-  ".convert-batch"
-  "inputs"
-)
-managed_status="$(
-  git status --porcelain=v1 --untracked-files=all -- "${managed_paths[@]}"
-)"
-if [[ -n "$managed_status" ]]; then
+# The pipeline commits everything it writes, so any leftover change means a
+# batch stopped midway; never publish that state.
+dirty_status="$(git status --porcelain=v1 --untracked-files=all)"
+if [[ -n "$dirty_status" ]]; then
   printf '%s\n' \
-    "Refusing to push because pipeline-managed files have uncommitted changes:" \
-    "$managed_status" >&2
+    "Refusing to push because the worktree has uncommitted changes:" \
+    "$dirty_status" >&2
   if ((pipeline_status == 0)); then
     pipeline_status=1
   fi
