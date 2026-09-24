@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import locale
+import re
 import shutil
 import subprocess
 from collections.abc import Awaitable, Callable, Sequence
@@ -24,6 +25,24 @@ _CONVERSION_TIMEOUT = 900.0
 _PROCESS_SHUTDOWN_TIMEOUT = 2.0
 _MARKER_TOOL = "marker_single"
 _PANDOC_TOOL = "pandoc"
+_DOCUMENT_FAILURE_PATTERNS = (
+    re.compile(
+        r"\b(?:corrupt(?:ed)?|damaged|malformed)\s+"
+        r"(?:input\s+)?(?:document|pdf|file)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:failed|unable)\s+to\s+parse\s+"
+        r"(?:input\s+|source\s+)?(?:document|pdf|file)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bunsupported\s+(?:input\s+|document\s+|file\s+)?"
+        r"(?:format|type)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bnot\s+a\s+(?:valid\s+)?pdf\b", re.IGNORECASE),
+)
 
 
 class CommandRunner:
@@ -79,14 +98,23 @@ class CommandRunner:
         )
 
         if completed.returncode != 0:
-            raise PaperError(completed.stderr.strip() or f"{argv[0]} failed") from (
-                subprocess.CalledProcessError(
-                    returncode=completed.returncode,
-                    cmd=completed.args,
-                    output=completed.stdout,
-                    stderr=completed.stderr,
-                )
+            output = "\n".join(
+                part.strip()
+                for part in (completed.stderr, completed.stdout)
+                if part.strip()
             )
+            message = output or f"{argv[0]} failed with exit {completed.returncode}"
+            process_error = subprocess.CalledProcessError(
+                returncode=completed.returncode,
+                cmd=completed.args,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+            if _is_document_failure(completed.returncode, output):
+                raise PaperError(message) from process_error
+            raise InfrastructureError(
+                f"conversion infrastructure failure: {message}"
+            ) from process_error
         return completed
 
 
@@ -124,6 +152,12 @@ async def _terminate_process(
 
 def _decode_output(data: bytes) -> str:
     return data.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+def _is_document_failure(returncode: int, output: str) -> bool:
+    if returncode < 0 or returncode in {137, 143}:
+        return False
+    return any(pattern.search(output) for pattern in _DOCUMENT_FAILURE_PATTERNS)
 
 
 @dataclass(frozen=True)

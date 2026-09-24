@@ -225,8 +225,8 @@ async def test_command_runner_cancellation_terminates_child(
 
 
 @pytest.mark.asyncio
-async def test_command_runner_maps_called_process_error_to_paper_error() -> None:
-    with pytest.raises(PaperError, match="converter exited 1") as exc_info:
+async def test_command_runner_isolates_recognized_corrupt_document_failure() -> None:
+    with pytest.raises(PaperError, match="corrupt input document") as exc_info:
         await CommandRunner().run(
             [
                 sys.executable,
@@ -234,7 +234,7 @@ async def test_command_runner_maps_called_process_error_to_paper_error() -> None
                 (
                     "import sys; "
                     "print('partial output'); "
-                    "print('converter exited 1', file=sys.stderr); "
+                    "print('corrupt input document', file=sys.stderr); "
                     "raise SystemExit(1)"
                 ),
             ],
@@ -246,7 +246,50 @@ async def test_command_runner_maps_called_process_error_to_paper_error() -> None
     assert isinstance(process_error.output, str)
     assert isinstance(process_error.stderr, str)
     assert process_error.output == "partial output\n"
-    assert process_error.stderr == "converter exited 1\n"
+    assert process_error.stderr == "corrupt input document\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returncode", [-15, 137, 143])
+async def test_command_runner_maps_termination_exits_to_infrastructure_error(
+    returncode: int,
+) -> None:
+    if returncode < 0:
+        script = "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"
+    else:
+        script = f"raise SystemExit({returncode})"
+
+    with pytest.raises(InfrastructureError, match="conversion infrastructure failure"):
+        await CommandRunner().run([sys.executable, "-c", script], timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "stream"),
+    [
+        ("CUDA out of memory", "stdout"),
+        ("No space left on device", "stderr"),
+        ("failed to initialize model", "stderr"),
+        ("error loading model weights", "stderr"),
+        ("cache directory is not writable", "stderr"),
+        ("PyTorch shared library could not be loaded", "stderr"),
+        ("libcudnn.so: cannot open shared object file", "stderr"),
+        ("unclassified converter failure", "stderr"),
+    ],
+)
+async def test_command_runner_fails_safe_for_infrastructure_and_unknown_errors(
+    message: str,
+    stream: str,
+) -> None:
+    destination = "" if stream == "stdout" else ", file=sys.stderr"
+    script = (
+        "import sys; "
+        f"print({message!r}{destination}); "
+        "raise SystemExit(1)"
+    )
+
+    with pytest.raises(InfrastructureError, match="conversion infrastructure failure"):
+        await CommandRunner().run([sys.executable, "-c", script], timeout=5)
 
 
 @pytest.mark.asyncio
