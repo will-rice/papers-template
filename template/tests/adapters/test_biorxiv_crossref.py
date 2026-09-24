@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from papers_pipeline.adapters.base import FetchWindow
 from papers_pipeline.adapters.biorxiv_crossref import BiorxivCrossrefAdapter
-from papers_pipeline.config import AdapterConfig
+from papers_pipeline.config import AdapterConfig, FetchConfig
 from papers_pipeline.errors import ConfigError, InfrastructureError
-from papers_pipeline.http import RequestClient
+from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.normalize import normalize
 
 from .contract import assert_adapter_contract
@@ -76,6 +78,60 @@ async def test_biorxiv_uses_opaque_offset_continuation(
     assert second_page.next_cursor
     assert second_page.next_cursor != first_page.next_cursor
     assert second_page.capped is False
+
+
+@pytest.mark.asyncio
+async def test_biorxiv_local_truncation_resumes_raw_page_without_duplicates(
+    fetch_config: FetchConfig,
+    biorxiv_config: AdapterConfig,
+) -> None:
+    requests: list[httpx.Request] = []
+    fixture = (
+        Path(__file__).parents[1]
+        / "fixtures"
+        / "adapters"
+        / "biorxiv_crossref"
+        / "biorxiv-over-budget.json"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = fixture.read_text() if request.url.path.endswith("/0") else '{"collection":[]}'
+        return httpx.Response(200, text=body)
+
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(fetch_config.total_deadline_seconds),
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = BiorxivCrossrefAdapter()
+    config = biorxiv_config.model_copy(update={"page_size": 4, "max_results": 2})
+    window = FetchWindow(
+        start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+    )
+
+    first = await adapter.fetch(window, None, client, config)
+    second = await adapter.fetch(window, first.next_cursor, client, config)
+    final = await adapter.fetch(window, second.next_cursor, client, config)
+
+    assert tuple(record.source_id for record in first.records) == (
+        "10.1101/2024.01.02.000001",
+    )
+    assert first.permanent_errors == ("bioRxiv record lacks DOI, title, or date",)
+    assert first.capped is True
+    assert tuple(record.source_id for record in second.records) == (
+        "10.1101/2024.01.03.000002",
+    )
+    assert second.permanent_errors == ()
+    assert second.capped is True
+    assert final.records == ()
+    assert final.next_cursor is None
+    assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == [
+        "0",
+        "0",
+        "4",
+    ]
 
 
 @pytest.mark.asyncio

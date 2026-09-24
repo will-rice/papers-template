@@ -36,8 +36,6 @@ class BiorxivCrossrefAdapter:
             items = await _fetch_biorxiv(
                 window=window, client=client, offset=state["token"]
             )
-            records, errors = collect_records(items, parse_biorxiv)
-            next_token = str(int(state["token"]) + len(items))
         else:
             items, next_token = await _fetch_crossref(
                 window=window,
@@ -47,20 +45,20 @@ class BiorxivCrossrefAdapter:
             )
             records, errors = collect_records(items, parse_crossref)
 
-        filtered_records = tuple(
-            record
-            for record in records
-            if window.start <= record.published <= window.end
-        )
         if not items:
             return FetchPage(
-                records=filtered_records,
+                records=(),
                 next_cursor=None,
                 capped=False,
-                permanent_errors=errors,
+                permanent_errors=(),
             )
 
         if provider == _CROSSREF:
+            filtered_records = tuple(
+                record
+                for record in records
+                if window.start <= record.published <= window.end
+            )
             consumed = state["consumed"] + (0 if state["local_index"] else len(items))
             page = state["page"] + (0 if state["local_index"] else 1)
             remaining_records = _remaining_records(
@@ -93,21 +91,42 @@ class BiorxivCrossrefAdapter:
                 )
             else:
                 next_cursor = None
+            capped = page >= config.max_pages or consumed >= config.max_results
         else:
-            consumed = state["consumed"] + len(items)
-            page = state["page"] + 1
-            page_records = filtered_records[: config.max_results]
-            assert next_token is not None
+            if state["local_index"] > len(items):
+                raise InfrastructureError(
+                    f"invalid {provider} continuation cursor: {cursor or '<initial>'}"
+                )
+            raw_records = items[
+                state["local_index"] : state["local_index"] + config.max_results
+            ]
+            records, errors = collect_records(raw_records, parse_biorxiv)
+            page_records = tuple(
+                record
+                for record in records
+                if window.start <= record.published <= window.end
+            )
+            raw_end = state["local_index"] + len(raw_records)
+            consumed = state["consumed"] + len(raw_records)
+            page_complete = raw_end == len(items)
+            page = state["page"] + int(page_complete)
+            next_token = (
+                str(int(state["token"]) + len(items))
+                if page_complete
+                else state["token"]
+            )
             next_cursor = _encode_cursor(
                 {
                     "consumed": consumed,
-                    "local_index": 0,
+                    "local_index": 0 if page_complete else raw_end,
                     "page": page,
                     "provider": provider,
                     "token": next_token,
                 }
             )
-        capped = page >= config.max_pages or consumed >= config.max_results
+            capped = (
+                page >= config.max_pages or len(raw_records) >= config.max_results
+            )
         return FetchPage(
             records=page_records,
             next_cursor=next_cursor,
@@ -233,7 +252,6 @@ def _decode_cursor(cursor: str | None, *, provider: str) -> _CursorState:
         or encoded_provider != provider
         or not token
         or (provider == _BIORXIV and not token.isdigit())
-        or (provider == _BIORXIV and local_index != 0)
     ):
         raise InfrastructureError(f"invalid {provider} continuation cursor: {cursor}")
     return {
