@@ -40,11 +40,11 @@ import subprocess
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 
 from papers_pipeline.adapters.biorxiv_crossref import biorxiv_pdf_url
+from papers_pipeline.adapters.dblp import electronic_format
 from papers_pipeline.batching import expected_markdown, infer_backlog
 from papers_pipeline.convert import write_fixme
 from papers_pipeline.front_matter import write_front_matter
@@ -201,8 +201,7 @@ def legacy_record(row: dict[str, str]) -> SourceRecord:
         # dblp keeps its ee link, as the dblp adapter does, and
         # resolve_semantic_scholar replaces Semantic Scholar landing pages.
         # Either may already be a direct PDF.
-        is_pdf = urlparse(url).path.casefold().endswith(".pdf")
-        input_format, input_url = "pdf" if is_pdf else "html", url
+        input_format, input_url = electronic_format(url), url
     return SourceRecord(
         source=source,
         source_id=source_id,
