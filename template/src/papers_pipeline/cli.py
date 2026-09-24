@@ -15,6 +15,8 @@ from papers_pipeline.config import load_config
 from papers_pipeline.convert import CommandRunner, DownloadingMaterializer
 from papers_pipeline.errors import ConfigError, InfrastructureError
 from papers_pipeline.formatting import format_changed, shard_paths
+from papers_pipeline.front_matter import write_front_matter
+from papers_pipeline.inventory import read_inventory
 from papers_pipeline.git import GitRepository
 from papers_pipeline.http import RequestClient
 from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
@@ -38,6 +40,7 @@ def app(
     format_corpus = subparsers.add_parser("format-corpus")
     format_corpus.add_argument("--shard-index", type=int, required=True)
     format_corpus.add_argument("--shard-count", type=int, required=True)
+    subparsers.add_parser("front-matter")
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command == "validate":
@@ -96,6 +99,11 @@ def app(
             args.shard_count,
         )
         asyncio.run(format_changed(selected, CommandRunner()))
+    elif args.command == "front-matter":
+        root = Path.cwd()
+        changed = write_front_matter(root, read_inventory(root / "papers.csv"))
+        asyncio.run(format_changed(changed, CommandRunner()))
+        print(f"front matter updated: {len(changed)} papers")
     return 0
 
 

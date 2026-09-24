@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+from papers_pipeline.batching import expected_markdown
 from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.models import Paper
 
@@ -21,7 +22,7 @@ def write_index(root: Path, papers: Sequence[Paper]) -> Path:
     if start >= end:
         raise InfrastructureError("README generated-section markers are out of order")
 
-    generated = ("\n" + _render_index(papers)).encode("utf-8")
+    generated = ("\n" + _render_index(root, papers)).encode("utf-8")
     content = existing[: start + len(_START_MARKER)] + generated + existing[end:]
     if existing == content:
         return path
@@ -41,7 +42,7 @@ def _unique_marker_offset(content: bytes, marker: bytes, name: str) -> int:
     return content.index(marker)
 
 
-def _render_index(papers: Sequence[Paper]) -> str:
+def _render_index(root: Path, papers: Sequence[Paper]) -> str:
     rows = [
         "# Papers",
         "",
@@ -55,13 +56,19 @@ def _render_index(papers: Sequence[Paper]) -> str:
                 [
                     paper.published.isoformat(),
                     _escape_cell(paper.identifier),
-                    f"[{_escape_cell(paper.title)}]({_escape_cell(paper.url)})",
+                    f"[{_escape_cell(paper.title)}]({_escape_cell(_link(root, paper))})",
                     _escape_cell(paper.source),
                 ]
             )
             + " |"
         )
     return "\n".join(rows) + "\n"
+
+
+def _link(root: Path, paper: Paper) -> str:
+    """Link to the paper's markdown once generated, so the corpus is browsable."""
+    markdown = expected_markdown(root, paper)
+    return markdown.relative_to(root).as_posix() if markdown.exists() else paper.url
 
 
 def _paper_sort_key(paper: Paper) -> tuple[object, ...]:

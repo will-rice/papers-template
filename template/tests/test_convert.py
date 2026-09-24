@@ -11,6 +11,7 @@ import pytest
 
 
 from papers_pipeline.batching import Batch, expected_markdown, infer_backlog
+from papers_pipeline.front_matter import with_front_matter
 from papers_pipeline.adapters.arxiv import ArxivAdapter
 from papers_pipeline.adapters.base import FetchWindow
 from papers_pipeline.config import AdapterConfig, ConcurrencyConfig
@@ -984,7 +985,9 @@ async def test_marker_output_is_moved_from_marker_contract_location(
 
     output = expected_markdown(tmp_path, target)
     assert result.succeeded[0].output == output
-    assert output.read_text(encoding="utf-8") == "# converted .pdf\n"
+    assert output.read_text(encoding="utf-8") == with_front_matter(
+        target, "# converted .pdf\n"
+    )
     assert not any((tmp_path / ".convert-batch").glob("**/*.md"))
 
 

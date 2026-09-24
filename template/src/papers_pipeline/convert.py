@@ -15,6 +15,7 @@ from uuid import uuid4
 from papers_pipeline.batching import Batch, expected_markdown
 from papers_pipeline.config import ConcurrencyConfig
 from papers_pipeline.errors import InfrastructureError, PaperError
+from papers_pipeline.front_matter import with_front_matter
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
 from papers_pipeline.remote import RemoteDownloader
 
@@ -386,6 +387,12 @@ def _promote_successes(
         if result.error is not None or result.staged_output is None:
             continue
         output = expected_markdown(root, result.paper)
+        result.staged_output.write_text(
+            with_front_matter(
+                result.paper, result.staged_output.read_text(encoding="utf-8")
+            ),
+            encoding="utf-8",
+        )
         _atomic_move(result.staged_output, output)
         succeeded.append(PaperConversion(paper=result.paper, output=output, error=None))
     return tuple(succeeded)

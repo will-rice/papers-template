@@ -19,6 +19,12 @@ stage. Source continuations retain an opaque cursor and its exact UTC fetch
 window across bounded runs under one shared deadline. Conversion failures are
 isolated by paper; infrastructure failures stop the run.
 
+The corpus is built to be browsed by people and LLMs. Every paper in `papers/`
+starts with YAML front matter (identifier, title, authors, published date, URL,
+source, DOI, arXiv ID, and categories), and the index below links each
+converted paper to its local markdown file. Run `papers-pipeline front-matter`
+to refresh the front matter of every converted paper from `papers.csv`.
+
 ## Configuration
 
 `papers.yml` defines repository identity, enabled adapters, topic gates, fetch
@@ -62,6 +68,7 @@ npm install --global prettier@3.6.2
 uv run papers-pipeline validate --config papers.yml
 uv run papers-pipeline nightly --config papers.yml
 uv run papers-pipeline format-corpus --shard-index 0 --shard-count 8
+uv run papers-pipeline front-matter
 ```
 
 All tests use checked-in fixtures and run without source APIs or converter
