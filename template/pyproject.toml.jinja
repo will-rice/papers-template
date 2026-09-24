@@ -34,6 +34,9 @@ target-version = "py312"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/papers_pipeline"]
+# Editable installs also expose the repository root so the topic plugin
+# (topic_plugin:accept_topic) imports when papers-pipeline runs.
+dev-mode-dirs = ["src", "."]
 
 [build-system]
 requires = ["hatchling"]
