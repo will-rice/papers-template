@@ -182,9 +182,10 @@ def _huggingface_route(*, page: int, page_size: int, date: str) -> str:
 def _semantic_scholar_route(*, offset: int, page_size: int, query: str) -> str:
     return str(
         httpx.URL(
-            "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+            "https://api.semanticscholar.org/graph/v1/paper/search",
             params={
                 "query": query,
+                "publicationDateOrYear": "2024-01-01:2024-01-08",
                 "offset": str(offset),
                 "limit": str(page_size),
                 "fields": (

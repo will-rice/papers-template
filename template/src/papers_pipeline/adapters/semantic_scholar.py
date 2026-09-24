@@ -11,6 +11,12 @@ from papers_pipeline.http import RequestClient
 from papers_pipeline.models import SourceRecord
 
 
+# Relevance search pages by offset/limit and filters by publication date, but
+# only its first 1,000 results per query are reachable.
+_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+_REACHABLE_RESULTS = 1000
+
+
 class SemanticScholarAdapter:
     name = "semantic_scholar"
     record_sources = frozenset({"semantic_scholar"})
@@ -27,9 +33,12 @@ class SemanticScholarAdapter:
     ) -> FetchPage:
         state = _decode_cursor(cursor)
         text = await client.get_text(
-            "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+            _SEARCH_URL,
             {
                 "query": config.filters.get("query", "*"),
+                "publicationDateOrYear": (
+                    f"{window.start.date().isoformat()}:{window.end.date().isoformat()}"
+                ),
                 "offset": state["offset"],
                 "limit": str(config.page_size),
                 "fields": (
@@ -39,8 +48,15 @@ class SemanticScholarAdapter:
             },
             {"x-api-key": self.api_key},
         )
-        items, next_offset = _payload_page(text)
+        items, next_offset, total = _payload_page(text)
         parsed_records, errors = collect_records(items, self._record)
+        if state["page"] == 0 and total > _REACHABLE_RESULTS:
+            errors = (
+                *errors,
+                f"semantic_scholar window {window.start.date()}..{window.end.date()} "
+                f"matches {total} papers; only the first {_REACHABLE_RESULTS} are "
+                "reachable, so shorten the window",
+            )
         records = tuple(
             record
             for record in parsed_records
@@ -113,7 +129,7 @@ class _CursorState(TypedDict):
     page: int
 
 
-def _payload_page(text: str) -> tuple[list[object], object]:
+def _payload_page(text: str) -> tuple[list[object], object, int]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as error:
@@ -127,7 +143,14 @@ def _payload_page(text: str) -> tuple[list[object], object]:
         raise InfrastructureError(
             "invalid semantic_scholar payload: expected data list"
         )
-    return items, payload.get("next")
+    # The API documents total as a string but returns an integer.
+    try:
+        total = int(payload.get("total", 0))
+    except (TypeError, ValueError) as error:
+        raise InfrastructureError(
+            "invalid semantic_scholar payload: expected total"
+        ) from error
+    return items, payload.get("next"), total
 
 
 def _encode_cursor(state: _CursorState) -> str:

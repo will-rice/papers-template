@@ -211,6 +211,24 @@ def test_adapter_filters_must_match_supported_keys(
         load_config(valid_config, {})
 
 
+def test_semantic_scholar_page_size_matches_its_api_limit(valid_config: Path) -> None:
+    data = yaml.safe_load(valid_config.read_text(encoding="utf-8"))
+    data["adapters"] = [
+        {
+            "name": "semantic_scholar",
+            "secret_env": "SEMANTIC_SCHOLAR_API_KEY",
+            "lookback_days": 7,
+            "page_size": 101,
+            "max_pages": 1,
+            "max_results": 101,
+        }
+    ]
+    valid_config.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="page_size must be at most 100"):
+        load_config(valid_config, {"SEMANTIC_SCHOLAR_API_KEY": "secret"})
+
+
 def test_checked_in_schema_matches_model() -> None:
     expected = (
         json.dumps(

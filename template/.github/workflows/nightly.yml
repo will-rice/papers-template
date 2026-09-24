@@ -51,4 +51,6 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run and publish bounded batches
         timeout-minutes: 105
+        env:
+          SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
         run: .github/scripts/nightly.sh
