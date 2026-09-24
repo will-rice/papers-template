@@ -23,9 +23,13 @@ class FetchWindow(BaseModel):
     @model_validator(mode="after")
     def validate_window(self) -> "FetchWindow":
         if not self._is_aware(self.start) or not self._is_aware(self.end):
-            raise ValueError("FetchWindow.start and FetchWindow.end must be timezone-aware")
+            raise ValueError(
+                "FetchWindow.start and FetchWindow.end must be timezone-aware"
+            )
         if self.start > self.end:
-            raise ValueError("FetchWindow.start must be before or equal to FetchWindow.end")
+            raise ValueError(
+                "FetchWindow.start must be before or equal to FetchWindow.end"
+            )
         return self
 
     @staticmethod

@@ -4,7 +4,7 @@ import subprocess
 import warnings
 
 from copier import run_copy, run_update
-import yaml  # type: ignore[import-untyped]
+import yaml
 from copier.errors import DirtyLocalWarning
 
 

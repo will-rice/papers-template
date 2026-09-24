@@ -93,7 +93,8 @@ def test_fetch_window_is_immutable() -> None:
 
 def test_fetch_window_rejects_naive_datetimes() -> None:
     with pytest.raises(
-        ValidationError, match="FetchWindow.start and FetchWindow.end must be timezone-aware"
+        ValidationError,
+        match="FetchWindow.start and FetchWindow.end must be timezone-aware",
     ):
         FetchWindow(
             start=datetime(2024, 1, 1),
@@ -103,13 +104,13 @@ def test_fetch_window_rejects_naive_datetimes() -> None:
 
 def test_fetch_window_rejects_reversed_interval() -> None:
     with pytest.raises(
-        ValidationError, match="FetchWindow.start must be before or equal to FetchWindow.end"
+        ValidationError,
+        match="FetchWindow.start must be before or equal to FetchWindow.end",
     ):
         FetchWindow(
             start=datetime(2024, 1, 8, tzinfo=timezone.utc),
             end=datetime(2024, 1, 1, tzinfo=timezone.utc),
         )
-
 
 
 def _pipeline_config(adapters: list[AdapterConfig]) -> PipelineConfig:
@@ -171,7 +172,9 @@ def test_build_adapters_registers_all_runtime_families() -> None:
     assert semantic_adapter.api_key == "secret"
 
 
-def test_build_adapters_avoids_missing_semantic_scholar_key_for_omitted_or_disabled_config() -> None:
+def test_build_adapters_avoids_missing_semantic_scholar_key_for_omitted_or_disabled_config() -> (
+    None
+):
     omitted = build_adapters(_pipeline_config([]), {})
     disabled = build_adapters(
         _pipeline_config(

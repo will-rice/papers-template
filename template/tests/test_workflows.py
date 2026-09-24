@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml  # type: ignore[import-untyped, unused-ignore]
+import yaml
 
 from papers_pipeline.pipeline import PipelinePaths, _managed_paths
 
 
-class WorkflowLoader(yaml.SafeLoader):  # type: ignore[misc]
+class WorkflowLoader(yaml.SafeLoader):
     """Load workflow YAML without treating the key `on` as a boolean."""
 
 

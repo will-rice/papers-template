@@ -45,7 +45,9 @@ class SemanticScholarAdapter:
         items, next_offset = _payload_page(text)
         parsed_records, errors = collect_records(items, self._record)
         records = tuple(
-            record for record in parsed_records if window.start <= record.published <= window.end
+            record
+            for record in parsed_records
+            if window.start <= record.published <= window.end
         )
         if not items:
             return FetchPage(
@@ -80,7 +82,9 @@ class SemanticScholarAdapter:
         if not isinstance(item, dict):
             raise PaperError("semantic_scholar record missing object: <unknown>")
 
-        identifier = _required_text(item.get("paperId"), field="paperId", identifier="<unknown>")
+        identifier = _required_text(
+            item.get("paperId"), field="paperId", identifier="<unknown>"
+        )
         title = _required_text(item.get("title"), field="title", identifier=identifier)
         published = _required_datetime(
             item.get("publicationDate"),
@@ -116,12 +120,16 @@ def _payload_page(text: str) -> tuple[list[object], object]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as error:
-        raise InfrastructureError(f"invalid JSON from semantic_scholar: {error}") from error
+        raise InfrastructureError(
+            f"invalid JSON from semantic_scholar: {error}"
+        ) from error
     if not isinstance(payload, dict):
         raise InfrastructureError("invalid semantic_scholar payload: expected object")
     items = payload.get("data")
     if not isinstance(items, list):
-        raise InfrastructureError("invalid semantic_scholar payload: expected data list")
+        raise InfrastructureError(
+            "invalid semantic_scholar payload: expected data list"
+        )
     return items, payload.get("next")
 
 
@@ -143,7 +151,9 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
             f"invalid semantic_scholar continuation cursor: {cursor}"
         ) from error
     if not isinstance(data, dict):
-        raise InfrastructureError(f"invalid semantic_scholar continuation cursor: {cursor}")
+        raise InfrastructureError(
+            f"invalid semantic_scholar continuation cursor: {cursor}"
+        )
 
     consumed = data.get("consumed")
     offset = data.get("offset")
@@ -162,7 +172,9 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
         or not isinstance(page, int)
         or page < 0
     ):
-        raise InfrastructureError(f"invalid semantic_scholar continuation cursor: {cursor}")
+        raise InfrastructureError(
+            f"invalid semantic_scholar continuation cursor: {cursor}"
+        )
     return {"consumed": consumed, "offset": normalized_offset, "page": page}
 
 
@@ -185,10 +197,14 @@ def _next_offset(*, current_offset: str, payload_next: object, item_count: int) 
 
 def _required_pdf_url(value: object, *, identifier: str) -> str:
     if not isinstance(value, dict):
-        raise PaperError(f"semantic_scholar record missing openAccessPdf.url: {identifier}")
+        raise PaperError(
+            f"semantic_scholar record missing openAccessPdf.url: {identifier}"
+        )
     url = _optional_text(value.get("url"))
     if not url:
-        raise PaperError(f"semantic_scholar record missing openAccessPdf.url: {identifier}")
+        raise PaperError(
+            f"semantic_scholar record missing openAccessPdf.url: {identifier}"
+        )
     return url
 
 
@@ -204,7 +220,9 @@ def _required_datetime(value: object, *, field: str, identifier: str) -> datetim
         else:
             published = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
     except ValueError as error:
-        raise PaperError(f"semantic_scholar record invalid {field}: {identifier}") from error
+        raise PaperError(
+            f"semantic_scholar record invalid {field}: {identifier}"
+        ) from error
     if published.tzinfo is None or published.utcoffset() is None:
         published = published.replace(tzinfo=timezone.utc)
     return published

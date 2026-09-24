@@ -5,7 +5,9 @@ import textwrap
 
 import pytest
 
+from papers_pipeline.config import TopicConfig
 from papers_pipeline.errors import ConfigError
+from papers_pipeline.models import Paper, SourceRecord
 from papers_pipeline.normalize import deduplicate, normalize
 from papers_pipeline.topics import TopicDecision, build_topic_gate
 
@@ -17,11 +19,17 @@ from papers_pipeline.topics import TopicDecision, build_topic_gate
         ("BirdCLEF: Audio Detection", "BirdCLEF: Audio Detection"),
     ],
 )
-def test_normalize_collapses_whitespace(source_record, title: str, expected: str) -> None:
-    assert normalize(source_record.model_copy(update={"title": title})).title == expected
+def test_normalize_collapses_whitespace(
+    source_record: SourceRecord, title: str, expected: str
+) -> None:
+    assert (
+        normalize(source_record.model_copy(update={"title": title})).title == expected
+    )
 
 
-def test_normalize_sets_identifier_and_canonical_fields(source_record) -> None:
+def test_normalize_sets_identifier_and_canonical_fields(
+    source_record: SourceRecord,
+) -> None:
     paper = normalize(
         source_record.model_copy(
             update={
@@ -48,7 +56,7 @@ def test_normalize_sets_identifier_and_canonical_fields(source_record) -> None:
     ],
 )
 def test_normalize_canonicalizes_arxiv_ids(
-    source_record, raw_arxiv_id: str, expected: str
+    source_record: SourceRecord, raw_arxiv_id: str, expected: str
 ) -> None:
     paper = normalize(source_record.model_copy(update={"arxiv_id": raw_arxiv_id}))
 
@@ -56,7 +64,7 @@ def test_normalize_canonicalizes_arxiv_ids(
     assert paper.identifier == f"arxiv:{expected}"
 
 
-def test_dedupe_prefers_arxiv_then_doi_then_source(source_record) -> None:
+def test_dedupe_prefers_arxiv_then_doi_then_source(source_record: SourceRecord) -> None:
     arxiv = normalize(
         source_record.model_copy(update={"source": "arxiv", "arxiv_id": "2401.1"})
     )
@@ -69,7 +77,9 @@ def test_dedupe_prefers_arxiv_then_doi_then_source(source_record) -> None:
     assert deduplicate([semantic, arxiv]) == [arxiv]
 
 
-def test_deduplicate_merges_bibliographic_fallback_without_strong_ids(source_record) -> None:
+def test_deduplicate_merges_bibliographic_fallback_without_strong_ids(
+    source_record: SourceRecord,
+) -> None:
     semantic = normalize(
         source_record.model_copy(
             update={"source": "semantic_scholar", "source_id": "semantic-1"}
@@ -88,7 +98,9 @@ def test_deduplicate_merges_bibliographic_fallback_without_strong_ids(source_rec
     assert deduplicate([dblp, semantic]) == [semantic]
 
 
-def test_deduplicate_prefers_strong_id_match_over_bibliographic_fallback(source_record) -> None:
+def test_deduplicate_prefers_strong_id_match_over_bibliographic_fallback(
+    source_record: SourceRecord,
+) -> None:
     arxiv = normalize(
         source_record.model_copy(
             update={"source": "arxiv", "source_id": "2401.1", "arxiv_id": "2401.1"}
@@ -107,7 +119,9 @@ def test_deduplicate_prefers_strong_id_match_over_bibliographic_fallback(source_
     assert deduplicate([weak_match, arxiv]) == [arxiv]
 
 
-def test_deduplicate_backfills_doi_from_lower_ranked_duplicate(source_record) -> None:
+def test_deduplicate_backfills_doi_from_lower_ranked_duplicate(
+    source_record: SourceRecord,
+) -> None:
     arxiv = normalize(
         source_record.model_copy(
             update={"source": "arxiv", "source_id": "2401.1", "arxiv_id": "2401.1"}
@@ -132,7 +146,9 @@ def test_deduplicate_backfills_doi_from_lower_ranked_duplicate(source_record) ->
     assert paper.identifier == "arxiv:2401.1"
 
 
-def test_deduplicate_keeps_preferred_conflicting_ids_deterministically(source_record) -> None:
+def test_deduplicate_keeps_preferred_conflicting_ids_deterministically(
+    source_record: SourceRecord,
+) -> None:
     arxiv = normalize(
         source_record.model_copy(
             update={
@@ -156,28 +172,28 @@ def test_deduplicate_keeps_preferred_conflicting_ids_deterministically(source_re
 
     first, second = deduplicate([semantic, arxiv]), deduplicate([arxiv, semantic])
 
-    assert first == second == [
-        arxiv.model_copy(update={"doi": "10.1000/preferred"})
-    ]
+    assert first == second == [arxiv.model_copy(update={"doi": "10.1000/preferred"})]
 
 
-def test_deduplicate_source_precedence_is_order_independent(source_record) -> None:
+def test_deduplicate_source_precedence_is_order_independent(
+    source_record: SourceRecord,
+) -> None:
     semantic = normalize(
         source_record.model_copy(
             update={"source": "semantic_scholar", "source_id": "semantic-1"}
         )
     )
     dblp = normalize(
-        source_record.model_copy(
-            update={"source": "dblp", "source_id": "dblp-1"}
-        )
+        source_record.model_copy(update={"source": "dblp", "source_id": "dblp-1"})
     )
 
     assert deduplicate([semantic, dblp]) == [semantic]
     assert deduplicate([dblp, semantic]) == [semantic]
 
 
-def test_declarative_gate_reports_exclusion(topic_config, paper) -> None:
+def test_declarative_gate_reports_exclusion(
+    topic_config: TopicConfig, paper: Paper
+) -> None:
     gate = build_topic_gate(topic_config.model_copy(update={"exclude_any": ["survey"]}))
 
     decision = gate(paper.model_copy(update={"abstract": "A survey of speech"}))
@@ -186,7 +202,9 @@ def test_declarative_gate_reports_exclusion(topic_config, paper) -> None:
     assert decision.reason == "matched excluded term: survey"
 
 
-def test_declarative_gate_reports_missing_requirements(topic_config, paper) -> None:
+def test_declarative_gate_reports_missing_requirements(
+    topic_config: TopicConfig, paper: Paper
+) -> None:
     gate = build_topic_gate(
         topic_config.model_copy(update={"include_all": ["speech", "translation"]})
     )
@@ -199,7 +217,9 @@ def test_declarative_gate_reports_missing_requirements(topic_config, paper) -> N
     )
 
 
-def test_declarative_gate_reports_missing_categories(topic_config, paper) -> None:
+def test_declarative_gate_reports_missing_categories(
+    topic_config: TopicConfig, paper: Paper
+) -> None:
     gate = build_topic_gate(topic_config.model_copy(update={"categories": ["cs.LG"]}))
 
     decision = gate(paper)
@@ -210,16 +230,20 @@ def test_declarative_gate_reports_missing_categories(topic_config, paper) -> Non
     )
 
 
-def test_plugin_reference_must_use_module_function_format(topic_config) -> None:
-    with pytest.raises(ConfigError, match="topic.plugin must use module:function format"):
+def test_plugin_reference_must_use_module_function_format(
+    topic_config: TopicConfig,
+) -> None:
+    with pytest.raises(
+        ConfigError, match="topic.plugin must use module:function format"
+    ):
         build_topic_gate(topic_config.model_copy(update={"plugin": "invalid-plugin"}))
 
 
 def test_plugin_gate_rejects_incorrect_return_type(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    topic_config,
-    paper,
+    topic_config: TopicConfig,
+    paper: Paper,
 ) -> None:
     plugin = _write_plugin(
         tmp_path,
@@ -241,8 +265,8 @@ def test_plugin_gate_rejects_incorrect_return_type(
 def test_plugin_gate_accepts_normalized_paper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    topic_config,
-    source_record,
+    topic_config: TopicConfig,
+    source_record: SourceRecord,
 ) -> None:
     plugin = _write_plugin(
         tmp_path,

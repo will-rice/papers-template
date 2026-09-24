@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -16,7 +16,7 @@ from pydantic import (
     model_validator,
 )
 
-from papers_pipeline.errors import ConfigError
+from papers_pipeline.errors import ConfigError as ConfigError
 
 AdapterName = Literal[
     "arxiv",
@@ -197,6 +197,10 @@ def load_config(path: Path, environ: Mapping[str, str]) -> PipelineConfig:
         raise ConfigError(_format_validation_error(error)) from error
 
     for adapter in config.adapters:
-        if adapter.enabled and adapter.secret_env and not environ.get(adapter.secret_env):
+        if (
+            adapter.enabled
+            and adapter.secret_env
+            and not environ.get(adapter.secret_env)
+        ):
             raise ConfigError(f"{adapter.name}: missing secret {adapter.secret_env}")
     return config

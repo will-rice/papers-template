@@ -30,7 +30,9 @@ class PapersWithCodeAdapter:
         config: AdapterConfig,
     ) -> FetchPage:
         state = _decode_cursor(cursor)
-        request_url, request_params = _request_target(state["url"], page_size=config.page_size)
+        request_url, request_params = _request_target(
+            state["url"], page_size=config.page_size
+        )
         text = await client.get_text(
             request_url,
             request_params,
@@ -39,7 +41,9 @@ class PapersWithCodeAdapter:
         items, next_url = _payload_page(text)
         records, errors = collect_records(items, parse_papers_with_code)
         filtered_records = tuple(
-            record for record in records if window.start <= record.published <= window.end
+            record
+            for record in records
+            if window.start <= record.published <= window.end
         )
         if not items:
             return FetchPage(
@@ -78,10 +82,7 @@ class PapersWithCodeAdapter:
             )
         else:
             next_cursor = None
-        capped = (
-            page >= config.max_pages
-            or consumed >= config.max_results
-        )
+        capped = page >= config.max_pages or consumed >= config.max_results
         return FetchPage(
             records=page_records,
             next_cursor=next_cursor,
@@ -101,12 +102,16 @@ def _payload_page(text: str) -> tuple[list[object], str | None]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as error:
-        raise InfrastructureError(f"invalid JSON from papers_with_code: {error}") from error
+        raise InfrastructureError(
+            f"invalid JSON from papers_with_code: {error}"
+        ) from error
     if not isinstance(payload, dict):
         raise InfrastructureError("invalid papers_with_code payload: expected object")
     items = payload.get("results")
     if not isinstance(items, list):
-        raise InfrastructureError("invalid papers_with_code payload: expected results list")
+        raise InfrastructureError(
+            "invalid papers_with_code payload: expected results list"
+        )
     next_value = payload.get("next")
     if next_value is None:
         return items, None
@@ -134,7 +139,9 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
             f"invalid papers_with_code continuation cursor: {cursor}"
         ) from error
     if not isinstance(data, dict):
-        raise InfrastructureError(f"invalid papers_with_code continuation cursor: {cursor}")
+        raise InfrastructureError(
+            f"invalid papers_with_code continuation cursor: {cursor}"
+        )
 
     consumed = data.get("consumed")
     local_index = data.get("local_index", 0)
@@ -148,7 +155,9 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
         or not isinstance(page, int)
         or page < 0
     ):
-        raise InfrastructureError(f"invalid papers_with_code continuation cursor: {cursor}")
+        raise InfrastructureError(
+            f"invalid papers_with_code continuation cursor: {cursor}"
+        )
     validated_url = _validate_next_url(url)
     return {
         "consumed": consumed,
@@ -201,7 +210,9 @@ def parse_papers_with_code(item: object) -> SourceRecord:
     try:
         published = datetime.fromisoformat(published_text.replace("Z", "+00:00"))
     except ValueError as error:
-        raise PaperError("Papers With Code record lacks id, title, date, or PDF") from error
+        raise PaperError(
+            "Papers With Code record lacks id, title, date, or PDF"
+        ) from error
     authors = item.get("authors")
     author_rows = authors if isinstance(authors, list) else []
     arxiv_id = _clean(str(item.get("arxiv_id") or "")) or None
@@ -210,9 +221,12 @@ def parse_papers_with_code(item: object) -> SourceRecord:
         source_id=paper_id,
         title=title,
         abstract=_clean(str(item.get("abstract") or "")),
-        authors=tuple(_clean(str(author)) for author in author_rows if _clean(str(author))),
+        authors=tuple(
+            _clean(str(author)) for author in author_rows if _clean(str(author))
+        ),
         published=published,
-        url=_clean(str(item.get("url_abs") or "")) or f"https://paperswithcode.com/paper/{paper_id}",
+        url=_clean(str(item.get("url_abs") or ""))
+        or f"https://paperswithcode.com/paper/{paper_id}",
         input_format="pdf",
         input_url=pdf_url,
         arxiv_id=arxiv_id,

@@ -87,7 +87,9 @@ async def test_semantic_scholar_max_pages_sets_capped_without_dropping_cursor(
         ),
         cursor=first_page.next_cursor,
         client=semantic_scholar_client,
-        config=semantic_scholar_config.model_copy(update={"max_pages": 2, "max_results": 10}),
+        config=semantic_scholar_config.model_copy(
+            update={"max_pages": 2, "max_results": 10}
+        ),
     )
 
     assert second_page.next_cursor
@@ -106,7 +108,9 @@ async def test_semantic_scholar_max_results_sets_capped_without_dropping_cursor(
         ),
         cursor=None,
         client=semantic_scholar_client,
-        config=semantic_scholar_config.model_copy(update={"max_pages": 10, "max_results": 1}),
+        config=semantic_scholar_config.model_copy(
+            update={"max_pages": 10, "max_results": 1}
+        ),
     )
 
     assert tuple(record.source_id for record in page.records) == ("abc123",)
@@ -240,7 +244,9 @@ async def test_semantic_scholar_malformed_only_page_counts_toward_max_results(
         ),
         cursor=None,
         client=semantic_scholar_malformed_only_client,
-        config=semantic_scholar_config.model_copy(update={"max_pages": 10, "max_results": 1}),
+        config=semantic_scholar_config.model_copy(
+            update={"max_pages": 10, "max_results": 1}
+        ),
     )
 
     assert page.records == ()

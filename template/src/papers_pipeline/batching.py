@@ -27,7 +27,11 @@ class Batch:
 
 
 def expected_markdown(root: Path, paper: Paper) -> Path:
-    return root / "papers" / f"{_identifier_slug(paper.identifier)}--{_identifier_digest(paper.identifier)}.md"
+    return (
+        root
+        / "papers"
+        / f"{_identifier_slug(paper.identifier)}--{_identifier_digest(paper.identifier)}.md"
+    )
 
 
 def infer_backlog(papers: Iterable[Paper], root: Path) -> Backlog:

@@ -37,7 +37,9 @@ class RecordingRunner(CommandRunner):
         self, argv: Sequence[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
-        return subprocess.CompletedProcess(args=list(argv), returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=list(argv), returncode=0, stdout="", stderr=""
+        )
 
 
 class RaisingRunner(CommandRunner):
@@ -95,7 +97,10 @@ async def test_format_changed_is_noop_for_empty_or_unsupported_input() -> None:
 @pytest.mark.parametrize(
     ("error", "expected_match"),
     [
-        (InfrastructureError("missing conversion tool: prettier"), "missing conversion tool"),
+        (
+            InfrastructureError("missing conversion tool: prettier"),
+            "missing conversion tool",
+        ),
         (
             PaperError("prettier exited 1"),
             "prettier exited 1",
@@ -126,14 +131,22 @@ def test_shard_paths_partitions_sorted_corpus_exactly_once(tmp_path: Path) -> No
     ]
 
     shards = [
-        shard_paths(list(reversed(corpus)) + [corpus[1], corpus[3], corpus[1]], index, 3)
+        shard_paths(
+            list(reversed(corpus)) + [corpus[1], corpus[3], corpus[1]], index, 3
+        )
         for index in range(3)
     ]
     ordered = tuple(sorted(corpus))
 
-    assert shards[0] == tuple(path for position, path in enumerate(ordered) if position % 3 == 0)
-    assert shards[1] == tuple(path for position, path in enumerate(ordered) if position % 3 == 1)
-    assert shards[2] == tuple(path for position, path in enumerate(ordered) if position % 3 == 2)
+    assert shards[0] == tuple(
+        path for position, path in enumerate(ordered) if position % 3 == 0
+    )
+    assert shards[1] == tuple(
+        path for position, path in enumerate(ordered) if position % 3 == 1
+    )
+    assert shards[2] == tuple(
+        path for position, path in enumerate(ordered) if position % 3 == 2
+    )
     assert set(shards[0]).isdisjoint(shards[1])
     assert set(shards[0]).isdisjoint(shards[2])
     assert set(shards[1]).isdisjoint(shards[2])
@@ -151,7 +164,9 @@ def test_shard_paths_validates_bounds(
         shard_paths([tmp_path / "a.md"], shard_index, shard_count)
 
 
-def test_write_index_is_deterministic_and_skips_unchanged_rewrites(tmp_path: Path) -> None:
+def test_write_index_is_deterministic_and_skips_unchanged_rewrites(
+    tmp_path: Path,
+) -> None:
     papers = (
         paper("paper:3", published=datetime(2025, 1, 3, 9, tzinfo=timezone.utc)),
         paper("paper:1", published=datetime(2025, 1, 1, 9, tzinfo=timezone.utc)),

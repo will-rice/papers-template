@@ -48,10 +48,14 @@ async def test_dblp_continuation_cursor_is_deterministic_and_opaque(
         config=dblp_config,
     )
 
-    assert tuple(record.source_id for record in first_page.records) == ("conf/test/Fixture24",)
+    assert tuple(record.source_id for record in first_page.records) == (
+        "conf/test/Fixture24",
+    )
     assert first_page.next_cursor
     assert first_page.next_cursor != "1"
-    assert tuple(record.source_id for record in second_page.records) == ("journals/test/Fixture25",)
+    assert tuple(record.source_id for record in second_page.records) == (
+        "journals/test/Fixture25",
+    )
     assert second_page.next_cursor
     assert second_page.next_cursor != first_page.next_cursor
     assert second_page.capped is False
@@ -102,7 +106,9 @@ async def test_dblp_max_results_sets_capped_without_dropping_cursor(
         config=dblp_config.model_copy(update={"max_pages": 10, "max_results": 1}),
     )
 
-    assert tuple(record.source_id for record in page.records) == ("conf/test/Fixture24",)
+    assert tuple(record.source_id for record in page.records) == (
+        "conf/test/Fixture24",
+    )
     assert page.next_cursor
     assert page.capped is True
 
@@ -162,7 +168,9 @@ async def test_dblp_same_year_record_is_included_for_exact_day_window(
         config=dblp_config,
     )
 
-    assert tuple(record.source_id for record in page.records) == ("conf/test/Fixture24",)
+    assert tuple(record.source_id for record in page.records) == (
+        "conf/test/Fixture24",
+    )
 
 
 @pytest.mark.asyncio
@@ -198,7 +206,9 @@ async def test_dblp_keeps_valid_records_and_surfaces_missing_conversion_input(
         config=dblp_config,
     )
 
-    assert tuple(record.source_id for record in page.records) == ("conf/test/Fixture24",)
+    assert tuple(record.source_id for record in page.records) == (
+        "conf/test/Fixture24",
+    )
     assert page.permanent_errors == (
         "dblp record missing electronic URL: conf/test/Broken24",
     )
@@ -233,7 +243,9 @@ async def test_dblp_all_out_of_window_page_preserves_progress_for_continuation(
     assert first_page.records == ()
     assert first_page.next_cursor
     assert first_page.capped is False
-    assert tuple(record.source_id for record in second_page.records) == ("journals/test/Fixture25",)
+    assert tuple(record.source_id for record in second_page.records) == (
+        "journals/test/Fixture25",
+    )
 
 
 @pytest.mark.asyncio

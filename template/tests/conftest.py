@@ -100,10 +100,14 @@ def fixture_transport() -> FixtureTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             url = str(request.url)
             if url not in recorded_routes:
-                raise AssertionError(f"unexpected recorded fixture URL: {request.method} {url}")
+                raise AssertionError(
+                    f"unexpected recorded fixture URL: {request.method} {url}"
+                )
             status_code, headers, body, mode = recorded_routes[url]
             if mode == "text":
-                return httpx.Response(status_code, headers=headers, text=cast(str, body))
+                return httpx.Response(
+                    status_code, headers=headers, text=cast(str, body)
+                )
             return httpx.Response(status_code, headers=headers, content=body)
 
         return httpx.MockTransport(handler)
@@ -138,16 +142,16 @@ def _recording_request_client(
     config: FetchConfig,
     routes: dict[str, RecordedRoute],
 ) -> RecordedRequestClient:
-    recorded_routes = {
-        url: _load_recorded_route(spec) for url, spec in routes.items()
-    }
+    recorded_routes = {url: _load_recorded_route(spec) for url, spec in routes.items()}
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         url = str(request.url)
         if url not in recorded_routes:
-            raise AssertionError(f"unexpected recorded fixture URL: {request.method} {url}")
+            raise AssertionError(
+                f"unexpected recorded fixture URL: {request.method} {url}"
+            )
         status_code, headers, body, mode = recorded_routes[url]
         if mode == "text":
             return httpx.Response(status_code, headers=headers, text=cast(str, body))
@@ -670,10 +674,14 @@ def dblp_client(
 ) -> RequestClient:
     transport = fixture_transport(
         {
-            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=0, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page.json",
             },
-            _dblp_route(offset=1, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=1, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page-2.json",
             },
         }
@@ -689,7 +697,9 @@ def dblp_malformed_client(
 ) -> RequestClient:
     transport = fixture_transport(
         {
-            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=0, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page-malformed-record.json",
             }
         }
@@ -705,7 +715,9 @@ def dblp_invalid_json_client(
 ) -> RequestClient:
     transport = fixture_transport(
         {
-            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=0, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page-invalid.json",
             }
         }
@@ -721,7 +733,9 @@ def dblp_invalid_payload_client(
 ) -> RequestClient:
     transport = fixture_transport(
         {
-            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=0, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page-invalid-payload.json",
             }
         }
@@ -737,10 +751,14 @@ def dblp_out_of_window_only_client(
 ) -> RequestClient:
     transport = fixture_transport(
         {
-            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=0, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page-out-of-window-only.json",
             },
-            _dblp_route(offset=1, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=1, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page-2.json",
             },
         }
@@ -756,7 +774,9 @@ def dblp_malformed_only_client(
 ) -> RequestClient:
     transport = fixture_transport(
         {
-            _dblp_route(offset=0, page_size=dblp_config.page_size, query="speech recognition"): {
+            _dblp_route(
+                offset=0, page_size=dblp_config.page_size, query="speech recognition"
+            ): {
                 "fixture": "adapters/dblp/page-malformed-only.json",
             }
         }
@@ -772,7 +792,9 @@ def _load_recorded_route(
     try:
         fixture_path.relative_to(fixtures_root)
     except ValueError as error:
-        raise ValueError(f"fixture path escapes test fixtures: {spec['fixture']}") from error
+        raise ValueError(
+            f"fixture path escapes test fixtures: {spec['fixture']}"
+        ) from error
     if not fixture_path.is_file():
         raise FileNotFoundError(f"missing recorded fixture: {spec['fixture']}")
 
@@ -793,7 +815,9 @@ def _biorxiv_route(*, start_date: str, end_date: str, offset: int) -> str:
     return f"https://api.biorxiv.org/details/biorxiv/{start_date}/{end_date}/{offset}"
 
 
-def _crossref_route(*, start_date: str, end_date: str, page_size: int, cursor: str) -> str:
+def _crossref_route(
+    *, start_date: str, end_date: str, page_size: int, cursor: str
+) -> str:
     return str(
         httpx.URL(
             "https://api.crossref.org/works",
@@ -1116,7 +1140,9 @@ def papers_with_code_client(
             _papers_with_code_route(page_size=papers_with_code_config.page_size): {
                 "fixture": "adapters/papers_with_code/page.json",
             },
-            _papers_with_code_route(page_size=papers_with_code_config.page_size, page=2): {
+            _papers_with_code_route(
+                page_size=papers_with_code_config.page_size, page=2
+            ): {
                 "fixture": "adapters/papers_with_code/page-2.json",
             },
         },
@@ -1199,7 +1225,9 @@ def papers_with_code_out_of_window_only_client(
             _papers_with_code_route(page_size=papers_with_code_config.page_size): {
                 "fixture": "adapters/papers_with_code/page-out-of-window-only.json",
             },
-            _papers_with_code_route(page_size=papers_with_code_config.page_size, page=2): {
+            _papers_with_code_route(
+                page_size=papers_with_code_config.page_size, page=2
+            ): {
                 "fixture": "adapters/papers_with_code/page-2.json",
             },
         }

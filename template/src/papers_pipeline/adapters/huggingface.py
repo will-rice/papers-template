@@ -37,13 +37,19 @@ class HuggingFaceAdapter:
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as error:
-            raise InfrastructureError(f"invalid JSON from huggingface: {error}") from error
+            raise InfrastructureError(
+                f"invalid JSON from huggingface: {error}"
+            ) from error
         if not isinstance(payload, list):
-            raise InfrastructureError("invalid JSON from huggingface: expected list payload")
+            raise InfrastructureError(
+                "invalid JSON from huggingface: expected list payload"
+            )
 
         parsed_records, errors = collect_records(payload, self._record)
         records = tuple(
-            record for record in parsed_records if window.start <= record.published <= window.end
+            record
+            for record in parsed_records
+            if window.start <= record.published <= window.end
         )
         if not payload:
             return FetchPage(
@@ -110,12 +116,19 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
         data = json.loads(decoded.decode("utf-8"))
     except (ValueError, json.JSONDecodeError) as error:
-        raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}") from error
+        raise InfrastructureError(
+            f"invalid huggingface continuation cursor: {cursor}"
+        ) from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
     consumed = data.get("consumed", data.get("emitted"))
     page = data.get("page")
-    if not isinstance(consumed, int) or consumed < 0 or not isinstance(page, int) or page < 0:
+    if (
+        not isinstance(consumed, int)
+        or consumed < 0
+        or not isinstance(page, int)
+        or page < 0
+    ):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
     return {"consumed": consumed, "page": page}
 
@@ -137,7 +150,9 @@ def _required_datetime(value: object, *, identifier: str) -> datetime:
     try:
         published = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise PaperError(f"huggingface record invalid publishedAt: {identifier}") from error
+        raise PaperError(
+            f"huggingface record invalid publishedAt: {identifier}"
+        ) from error
     if published.tzinfo is None or published.utcoffset() is None:
         raise PaperError(f"huggingface record invalid publishedAt: {identifier}")
     return published

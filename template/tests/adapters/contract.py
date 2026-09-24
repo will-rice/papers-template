@@ -21,5 +21,7 @@ async def assert_adapter_contract(
     )
     assert page.records
     assert all(record.source in adapter.record_sources for record in page.records)
-    assert all(WINDOW_START <= record.published <= WINDOW_END for record in page.records)
+    assert all(
+        WINDOW_START <= record.published <= WINDOW_END for record in page.records
+    )
     assert page.next_cursor is None or page.next_cursor

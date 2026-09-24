@@ -84,10 +84,16 @@ class RequestClient:
             except httpx.RequestError as error:
                 if self._is_retryable_request_error(error):
                     if attempt == self.config.retries:
-                        raise InfrastructureError(f"request retries exhausted: {url}") from error
-                    self.events.append(f"retry {attempt + 1}: network failure for {url}")
+                        raise InfrastructureError(
+                            f"request retries exhausted: {url}"
+                        ) from error
+                    self.events.append(
+                        f"retry {attempt + 1}: network failure for {url}"
+                    )
                 else:
-                    raise self._request_error_to_infrastructure_error(url, error) from error
+                    raise self._request_error_to_infrastructure_error(
+                        url, error
+                    ) from error
             else:
                 if response.status_code in {401, 403}:
                     raise InfrastructureError(f"authentication failed: {url}")
@@ -97,9 +103,7 @@ class RequestClient:
                     )
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == self.config.retries:
-                        raise InfrastructureError(
-                            f"request retries exhausted: {url}"
-                        )
+                        raise InfrastructureError(f"request retries exhausted: {url}")
                     self.events.append(
                         f"retry {attempt + 1}: HTTP {response.status_code} for {url}"
                     )
@@ -108,7 +112,7 @@ class RequestClient:
                         f"permanent HTTP {response.status_code}: {url}"
                     )
                 else:
-                    return response.text
+                    return str(response.text)
 
             await self._sleep_with_deadline(url, attempt)
 

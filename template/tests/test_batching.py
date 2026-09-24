@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from papers_pipeline.batching import Batch, Backlog, expected_markdown, infer_backlog, select_batch
+from papers_pipeline.batching import (
+    Batch,
+    Backlog,
+    expected_markdown,
+    infer_backlog,
+    select_batch,
+)
 from papers_pipeline.config import ConversionConfig
 from papers_pipeline.models import Paper
 
@@ -87,7 +93,9 @@ def test_expected_markdown_is_collision_resistant_for_similar_identifiers(
     assert result.pending == (papers[1],)
 
 
-def test_select_batch_is_bounded_by_count(config: ConversionConfig, papers: tuple[Paper, ...]) -> None:
+def test_select_batch_is_bounded_by_count(
+    config: ConversionConfig, papers: tuple[Paper, ...]
+) -> None:
     limited = config.model_copy(update={"max_papers": 2, "max_cost": 100})
 
     batch = select_batch(reversed(papers), limited)
@@ -97,7 +105,9 @@ def test_select_batch_is_bounded_by_count(config: ConversionConfig, papers: tupl
     assert batch.estimated_cost <= limited.max_cost
 
 
-def test_select_batch_is_bounded_by_cost(config: ConversionConfig, papers: tuple[Paper, ...]) -> None:
+def test_select_batch_is_bounded_by_cost(
+    config: ConversionConfig, papers: tuple[Paper, ...]
+) -> None:
     limited = config.model_copy(update={"max_cost": 6, "max_papers": 10})
 
     batch = select_batch(reversed(papers), limited)

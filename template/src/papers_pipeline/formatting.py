@@ -29,7 +29,9 @@ async def format_changed(paths: Sequence[Path], runner: CommandRunner) -> None:
     )
 
 
-def shard_paths(paths: Sequence[Path], shard_index: int, shard_count: int) -> tuple[Path, ...]:
+def shard_paths(
+    paths: Sequence[Path], shard_index: int, shard_count: int
+) -> tuple[Path, ...]:
     if shard_count < 1:
         raise ValueError("shard_count must be at least 1")
     if shard_index < 0 or shard_index >= shard_count:
@@ -38,5 +40,7 @@ def shard_paths(paths: Sequence[Path], shard_index: int, shard_count: int) -> tu
     unique_paths = {Path(path) for path in paths}
     ordered = tuple(sorted(unique_paths))
     return tuple(
-        path for position, path in enumerate(ordered) if position % shard_count == shard_index
+        path
+        for position, path in enumerate(ordered)
+        if position % shard_count == shard_index
     )

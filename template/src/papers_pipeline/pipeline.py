@@ -17,7 +17,7 @@ from papers_pipeline.convert import (
 from papers_pipeline.errors import CommitCompletedError, InfrastructureError
 from papers_pipeline.fetch import FetchResult, fetch_all
 from papers_pipeline.formatting import format_changed
-from papers_pipeline.git import GitRepository
+from papers_pipeline.git import GitOperations
 from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.indexing import write_index
 from papers_pipeline.inventory import read_inventory, write_inventory
@@ -43,7 +43,7 @@ class Dependencies:
     adapters: Mapping[str, Adapter]
     client_factory: Callable[[Deadline], RequestClient]
     runner: CommandRunner
-    git: GitRepository
+    git: GitOperations
     now: Callable[[], datetime]
     monotonic: Callable[[], float]
     materializer: InputMaterializer | None = None
@@ -142,14 +142,9 @@ async def run_nightly(
         backlog = infer_backlog(inventory, paths.root)
         summary.generated = len(backlog.generated)
         summary.pending = len(backlog.pending)
-        while (
-            backlog.pending
-            and batch_number < config.conversion.max_batches_per_run
-        ):
+        while backlog.pending and batch_number < config.conversion.max_batches_per_run:
             eligible = tuple(
-                paper
-                for paper in backlog.pending
-                if paper.identifier not in attempted
+                paper for paper in backlog.pending if paper.identifier not in attempted
             )
             batch = select_batch(eligible, config.conversion)
             if not batch.papers:
@@ -252,10 +247,7 @@ def _record_source_results(
 ) -> None:
     source_counts: list[SourceCounts] = []
     selected_new = deduplicate(accepted)
-    retained_keys = {
-        (paper.identifier, paper.source)
-        for paper in selected_new
-    }
+    retained_keys = {(paper.identifier, paper.source) for paper in selected_new}
     for item in fetched.stats:
         adapter = dependencies.adapters[item.source]
         source_records = [
@@ -265,9 +257,7 @@ def _record_source_results(
         ]
         source_normalized = [normalize(record) for record in source_records]
         source_accepted = [
-            paper
-            for paper in source_normalized
-            if config_gate(paper).accepted
+            paper for paper in source_normalized if config_gate(paper).accepted
         ]
         retained = sum(
             (paper.identifier, paper.source) in retained_keys
@@ -317,7 +307,7 @@ def _snapshot_files(paths: Sequence[Path]) -> dict[Path, bytes | None]:
 def _rollback_files(
     before: Mapping[Path, bytes | None],
     transaction_paths: Sequence[Path],
-    git: GitRepository,
+    git: GitOperations,
 ) -> None:
     rollback_error: OSError | None = None
     for path, content in before.items():

@@ -45,12 +45,16 @@ def build_topic_gate(config: TopicConfig) -> Callable[[Paper], TopicDecision]:
                 False,
                 f"missing required terms: {', '.join(missing_required_terms)}",
             )
-        if config.include_any and not any(term.casefold() in text for term in config.include_any):
+        if config.include_any and not any(
+            term.casefold() in text for term in config.include_any
+        ):
             return TopicDecision(
                 False,
                 f"missing included term: {', '.join(config.include_any)}",
             )
-        if config.categories and not set(config.categories).intersection(paper.categories):
+        if config.categories and not set(config.categories).intersection(
+            paper.categories
+        ):
             return TopicDecision(
                 False,
                 f"missing included category: {', '.join(config.categories)}",

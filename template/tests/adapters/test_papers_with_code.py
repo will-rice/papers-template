@@ -54,10 +54,14 @@ async def test_papers_with_code_uses_opaque_continuation_and_honors_api_next_url
         config=papers_with_code_config,
     )
 
-    assert tuple(record.source_id for record in first_page.records) == ("fixture-paper",)
+    assert tuple(record.source_id for record in first_page.records) == (
+        "fixture-paper",
+    )
     assert first_page.next_cursor
     assert first_page.next_cursor != "https://paperswithcode.com/api/v1/papers/?page=2"
-    assert tuple(record.source_id for record in second_page.records) == ("fixture-paper-2",)
+    assert tuple(record.source_id for record in second_page.records) == (
+        "fixture-paper-2",
+    )
     assert str(recording_client.requests[1].url) == (
         "https://paperswithcode.com/api/v1/papers/?page=2&items_per_page=1"
     )
@@ -101,7 +105,9 @@ async def test_papers_with_code_local_truncation_on_final_page_resumes_without_s
     papers_with_code_config: AdapterConfig,
 ) -> None:
     adapter = PapersWithCodeAdapter()
-    config = papers_with_code_config.model_copy(update={"page_size": 2, "max_results": 1})
+    config = papers_with_code_config.model_copy(
+        update={"page_size": 2, "max_results": 1}
+    )
 
     first_page = await adapter.fetch(
         window=FetchWindow(
@@ -122,10 +128,14 @@ async def test_papers_with_code_local_truncation_on_final_page_resumes_without_s
         config=config,
     )
 
-    assert tuple(record.source_id for record in first_page.records) == ("fixture-paper-local-1",)
+    assert tuple(record.source_id for record in first_page.records) == (
+        "fixture-paper-local-1",
+    )
     assert first_page.next_cursor
     assert first_page.capped is True
-    assert tuple(record.source_id for record in second_page.records) == ("fixture-paper-local-2",)
+    assert tuple(record.source_id for record in second_page.records) == (
+        "fixture-paper-local-2",
+    )
     assert second_page.next_cursor is None
     assert second_page.capped is True
 
@@ -206,7 +216,9 @@ async def test_papers_with_code_out_of_window_page_preserves_progress_for_contin
     assert first_page.records == ()
     assert first_page.next_cursor
     assert first_page.capped is False
-    assert tuple(record.source_id for record in second_page.records) == ("fixture-paper-2",)
+    assert tuple(record.source_id for record in second_page.records) == (
+        "fixture-paper-2",
+    )
 
 
 @pytest.mark.asyncio
@@ -221,7 +233,9 @@ async def test_papers_with_code_malformed_only_page_counts_toward_max_results(
         ),
         cursor=None,
         client=papers_with_code_malformed_only_client,
-        config=papers_with_code_config.model_copy(update={"max_pages": 10, "max_results": 1}),
+        config=papers_with_code_config.model_copy(
+            update={"max_pages": 10, "max_results": 1}
+        ),
     )
 
     assert page.records == ()

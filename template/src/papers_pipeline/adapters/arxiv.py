@@ -46,7 +46,9 @@ class ArxivAdapter:
         entries = tuple(root.findall("a:entry", ATOM))
         parsed_records, errors = collect_records(entries, self._record)
         records = tuple(
-            record for record in parsed_records if window.start <= record.published <= window.end
+            record
+            for record in parsed_records
+            if window.start <= record.published <= window.end
         )
         if not entries:
             return FetchPage(
@@ -78,7 +80,9 @@ class ArxivAdapter:
         published = _required_datetime(
             _find_text(entry, "a:published"), field="published", identifier=identifier
         )
-        title = _required_text(_find_text(entry, "a:title"), field="title", identifier=identifier)
+        title = _required_text(
+            _find_text(entry, "a:title"), field="title", identifier=identifier
+        )
         abstract = _required_text(
             _find_text(entry, "a:summary"), field="summary", identifier=identifier
         )
@@ -96,7 +100,8 @@ class ArxivAdapter:
         categories = tuple(
             category
             for category in (
-                _clean(node.attrib.get("term", "")) for node in entry.findall("a:category", ATOM)
+                _clean(node.attrib.get("term", ""))
+                for node in entry.findall("a:category", ATOM)
             )
             if category
         )
@@ -128,7 +133,9 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
         data = json.loads(decoded.decode("utf-8"))
     except (ValueError, json.JSONDecodeError) as error:
-        raise InfrastructureError(f"invalid arxiv continuation cursor: {cursor}") from error
+        raise InfrastructureError(
+            f"invalid arxiv continuation cursor: {cursor}"
+        ) from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid arxiv continuation cursor: {cursor}")
     consumed = data.get("consumed")
@@ -149,8 +156,12 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
 
 
 def _required_identifier(entry: ElementTree.Element) -> str:
-    raw_identifier = _required_text(_find_text(entry, "a:id"), field="id", identifier="<unknown>")
-    normalized = re.sub(r"(?i)^arxiv:", "", raw_identifier.rstrip("/").rsplit("/", 1)[-1])
+    raw_identifier = _required_text(
+        _find_text(entry, "a:id"), field="id", identifier="<unknown>"
+    )
+    normalized = re.sub(
+        r"(?i)^arxiv:", "", raw_identifier.rstrip("/").rsplit("/", 1)[-1]
+    )
     identifier = _clean(normalized)
     if not identifier:
         raise PaperError("arxiv record missing id: <unknown>")
@@ -167,7 +178,9 @@ def _required_datetime(value: str, *, field: str, identifier: str) -> datetime:
     try:
         published = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise PaperError(f"arxiv record invalid {field} timestamp: {identifier}") from error
+        raise PaperError(
+            f"arxiv record invalid {field} timestamp: {identifier}"
+        ) from error
     if published.tzinfo is None or published.utcoffset() is None:
         raise PaperError(f"arxiv record invalid {field} timestamp: {identifier}")
     return published

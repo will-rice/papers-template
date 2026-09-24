@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import httpx
 import pytest
@@ -281,7 +281,7 @@ async def test_request_client_supports_clean_shutdown(
 ) -> None:
     transport = httpx.MockTransport(lambda _: httpx.Response(200, text="ok"))
     closed = False
-    original_aclose: Callable[[], object] = transport.aclose
+    original_aclose: Callable[[], Awaitable[None]] = transport.aclose
 
     async def tracking_aclose() -> None:
         nonlocal closed

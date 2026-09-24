@@ -33,7 +33,9 @@ class BiorxivCrossrefAdapter:
         next_token: str | None
 
         if provider == _BIORXIV:
-            items = await _fetch_biorxiv(window=window, client=client, offset=state["token"])
+            items = await _fetch_biorxiv(
+                window=window, client=client, offset=state["token"]
+            )
             records, errors = collect_records(items, parse_biorxiv)
             next_token = str(int(state["token"]) + len(items))
         else:
@@ -46,7 +48,9 @@ class BiorxivCrossrefAdapter:
             records, errors = collect_records(items, parse_crossref)
 
         filtered_records = tuple(
-            record for record in records if window.start <= record.published <= window.end
+            record
+            for record in records
+            if window.start <= record.published <= window.end
         )
         if not items:
             return FetchPage(
@@ -103,10 +107,7 @@ class BiorxivCrossrefAdapter:
                     "token": next_token,
                 }
             )
-        capped = (
-            page >= config.max_pages
-            or consumed >= config.max_results
-        )
+        capped = page >= config.max_pages or consumed >= config.max_results
         return FetchPage(
             records=page_records,
             next_cursor=next_cursor,
@@ -179,7 +180,9 @@ async def _fetch_crossref(
         raise InfrastructureError("invalid crossref payload: expected message object")
     items = message.get("items")
     if not isinstance(items, list):
-        raise InfrastructureError("invalid crossref payload: expected message.items list")
+        raise InfrastructureError(
+            "invalid crossref payload: expected message.items list"
+        )
     next_cursor_value = message.get("next-cursor")
     next_cursor = (
         _clean(next_cursor_value) or None
@@ -209,7 +212,9 @@ def _decode_cursor(cursor: str | None, *, provider: str) -> _CursorState:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
         data = json.loads(decoded.decode("utf-8"))
     except (ValueError, json.JSONDecodeError) as error:
-        raise InfrastructureError(f"invalid {provider} continuation cursor: {cursor}") from error
+        raise InfrastructureError(
+            f"invalid {provider} continuation cursor: {cursor}"
+        ) from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid {provider} continuation cursor: {cursor}")
 
@@ -243,7 +248,9 @@ def _decode_cursor(cursor: str | None, *, provider: str) -> _CursorState:
 def _provider(config: AdapterConfig) -> str:
     provider = _clean(config.filters.get("provider", _BIORXIV))
     if provider not in {_BIORXIV, _CROSSREF}:
-        raise ConfigError("biorxiv_crossref.filters.provider must be biorxiv or crossref")
+        raise ConfigError(
+            "biorxiv_crossref.filters.provider must be biorxiv or crossref"
+        )
     return provider
 
 
@@ -365,7 +372,12 @@ def _crossref_authors(value: object) -> tuple[str, ...]:
         if not isinstance(item, dict):
             continue
         author = " ".join(
-            part for part in (_clean(str(item.get("given") or "")), _clean(str(item.get("family") or ""))) if part
+            part
+            for part in (
+                _clean(str(item.get("given") or "")),
+                _clean(str(item.get("family") or "")),
+            )
+            if part
         )
         if author:
             authors.append(author)

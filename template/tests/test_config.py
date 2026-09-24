@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -50,7 +51,7 @@ concurrency:
 
 
 @pytest.fixture
-def valid_config() -> Path:
+def valid_config() -> Iterator[Path]:
     fixtures_dir = Path("tests/.task-2")
     fixtures_dir.mkdir(parents=True, exist_ok=True)
     config_path = fixtures_dir / f"{uuid4()}.yml"
@@ -75,7 +76,12 @@ def _write_yaml(path: Path, data: dict[str, object]) -> None:
     ("section", "field", "value", "message"),
     [
         ("concurrency", "pdf", 2, "concurrency.pdf must equal 1"),
-        ("conversion", "max_papers", 0, "conversion.max_papers must be between 1 and 100"),
+        (
+            "conversion",
+            "max_papers",
+            0,
+            "conversion.max_papers must be between 1 and 100",
+        ),
         (
             "fetch",
             "total_deadline_seconds",
@@ -113,7 +119,9 @@ def test_enabled_adapter_requires_declared_secret(valid_config: Path) -> None:
         load_config(valid_config, {})
 
 
-@pytest.mark.parametrize("plugin", ["accept_topic", "topic_plugin", "topic-plugin:accept_topic"])
+@pytest.mark.parametrize(
+    "plugin", ["accept_topic", "topic_plugin", "topic-plugin:accept_topic"]
+)
 def test_plugin_reference_must_use_module_function_format(
     valid_config: Path, plugin: str
 ) -> None:
@@ -133,7 +141,11 @@ def test_plugin_reference_must_use_module_function_format(
     ("adapter_name", "filters", "message"),
     [
         ("arxiv", {"query": "*"}, "arxiv.filters only supports: search_query"),
-        ("huggingface", {"query": "*"}, "huggingface.filters does not support any keys"),
+        (
+            "huggingface",
+            {"query": "*"},
+            "huggingface.filters does not support any keys",
+        ),
         (
             "semantic_scholar",
             {"search_query": "*"},
@@ -173,16 +185,21 @@ def test_adapter_filters_must_match_supported_keys(
 
 
 def test_checked_in_schema_matches_model() -> None:
-    expected = json.dumps(
-        PipelineConfig.model_json_schema(),
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    expected = (
+        json.dumps(
+            PipelineConfig.model_json_schema(),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
     assert Path("papers.schema.json").read_text() == expected
 
 
-def test_validate_command_accepts_valid_config(valid_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_validate_command_accepts_valid_config(
+    valid_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     exit_code = app(["validate", "--config", str(valid_config)])
 
     captured = capsys.readouterr()
@@ -204,8 +221,5 @@ def test_validate_command_reports_invalid_config_without_traceback(
     captured = capsys.readouterr()
     assert exit_code != 0
     assert captured.out == ""
-    assert (
-        captured.err
-        == f"error: fix {valid_config}: concurrency.pdf must equal 1\n"
-    )
+    assert captured.err == f"error: fix {valid_config}: concurrency.pdf must equal 1\n"
     assert "Traceback" not in captured.err

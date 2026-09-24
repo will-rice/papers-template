@@ -65,12 +65,20 @@ class FakeMaterializer:
     async def materialize(self, paper: Paper, root: Path) -> MaterializedInput:
         behavior = self.behaviors.get(paper.input_url, "success")
         if behavior == "infra_error":
-            raise InfrastructureError(f"conversion input request failed: {paper.input_url}")
+            raise InfrastructureError(
+                f"conversion input request failed: {paper.input_url}"
+            )
         if behavior == "disk_error":
-            raise InfrastructureError(f"conversion input cache write failed: {paper.input_url}")
+            raise InfrastructureError(
+                f"conversion input cache write failed: {paper.input_url}"
+            )
 
         source = self.fixtures[paper.input_url]
-        local_path = root / "inputs" / f"{paper.identifier.replace(':', '-').replace('/', '-')}{source.suffix}"
+        local_path = (
+            root
+            / "inputs"
+            / f"{paper.identifier.replace(':', '-').replace('/', '-')}{source.suffix}"
+        )
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(source.read_bytes())
         self.materialized_urls[local_path] = paper.input_url
@@ -118,7 +126,9 @@ class TrackingRunner(CommandRunner):
                 raise RuntimeError("boom")
             if behavior != "no_output":
                 _write_converter_output(argv, input_path)
-            return subprocess.CompletedProcess(args=list(argv), returncode=0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                args=list(argv), returncode=0, stdout="", stderr=""
+            )
         finally:
             self.active[kind] -= 1
 
@@ -193,7 +203,9 @@ async def test_command_runner_cancellation_terminates_child(
 ) -> None:
     pid_file = tmp_path / "cancel.pid"
     child = _sleeping_child_script(pid_file)
-    task = asyncio.create_task(CommandRunner().run([sys.executable, "-c", child], timeout=5))
+    task = asyncio.create_task(
+        CommandRunner().run([sys.executable, "-c", child], timeout=5)
+    )
 
     pid = int((await _wait_for_file(pid_file)).strip())
     await asyncio.sleep(0.05)
@@ -241,9 +253,14 @@ async def test_downloading_materializer_materializes_remote_input_to_local_file(
         assert timeout == 900
         return b"<html><body>offline</body></html>"
 
-    result = await DownloadingMaterializer(downloader=downloader).materialize(target, tmp_path)
+    result = await DownloadingMaterializer(downloader=downloader).materialize(
+        target, tmp_path
+    )
 
-    assert result.local_path.read_text(encoding="utf-8") == "<html><body>offline</body></html>"
+    assert (
+        result.local_path.read_text(encoding="utf-8")
+        == "<html><body>offline</body></html>"
+    )
     assert result.local_path.is_absolute()
     assert result.local_path.parent == tmp_path / "inputs"
     assert result.cleanup_paths == (result.local_path,)
@@ -268,7 +285,9 @@ async def test_downloading_materializer_maps_disk_errors_to_infrastructure_error
         InfrastructureError,
         match=f"conversion input cache write failed: {target.input_url}",
     ):
-        await DownloadingMaterializer(downloader=downloader).materialize(target, tmp_path)
+        await DownloadingMaterializer(downloader=downloader).materialize(
+            target, tmp_path
+        )
 
 
 @pytest.mark.asyncio
@@ -290,13 +309,17 @@ async def test_html_and_latex_concurrency_are_bounded_independently(
     )
     runner = TrackingRunner(materializer=fake_materializer)
 
-    await convert_batch(batch, tmp_path, state, CONCURRENCY, runner, fake_materializer, NOW)
+    await convert_batch(
+        batch, tmp_path, state, CONCURRENCY, runner, fake_materializer, NOW
+    )
 
     assert runner.maximum_active == {"html": 2, "latex": 1, "pdf": 0}
 
 
 @pytest.mark.asyncio
-async def test_pdf_concurrency_never_exceeds_one(tmp_path: Path, state: PipelineState) -> None:
+async def test_pdf_concurrency_never_exceeds_one(
+    tmp_path: Path, state: PipelineState
+) -> None:
     batch = Batch(
         papers=(
             paper("arxiv:1", input_format="pdf"),
@@ -310,13 +333,17 @@ async def test_pdf_concurrency_never_exceeds_one(tmp_path: Path, state: Pipeline
     )
     runner = TrackingRunner(materializer=fake_materializer)
 
-    await convert_batch(batch, tmp_path, state, CONCURRENCY, runner, fake_materializer, NOW)
+    await convert_batch(
+        batch, tmp_path, state, CONCURRENCY, runner, fake_materializer, NOW
+    )
 
     assert runner.maximum_active["pdf"] == 1
 
 
 @pytest.mark.asyncio
-async def test_pdf_runtime_config_must_equal_one(tmp_path: Path, state: PipelineState) -> None:
+async def test_pdf_runtime_config_must_equal_one(
+    tmp_path: Path, state: PipelineState
+) -> None:
     batch = Batch(papers=(paper("arxiv:1", input_format="pdf"),), estimated_cost=1)
     fake_materializer = FakeMaterializer(
         fixtures={batch.papers[0].input_url: fixture_for(batch.papers[0])}
@@ -376,7 +403,9 @@ async def test_failures_accumulate_consecutively_until_success_clears_history(
 ) -> None:
     target = paper("ss:2", input_format="pdf")
     batch = Batch(papers=(target,), estimated_cost=1)
-    fake_materializer = FakeMaterializer(fixtures={target.input_url: fixture_for(target)})
+    fake_materializer = FakeMaterializer(
+        fixtures={target.input_url: fixture_for(target)}
+    )
     first = await convert_batch(
         batch,
         tmp_path,
@@ -431,12 +460,18 @@ async def test_third_failure_writes_fixme_atomically_and_clears_counter(
     prior_state = PipelineState(
         failures={
             target.identifier: [
-                FailureAttempt(occurred_at=NOW.replace(day=21), error="converter exited 1"),
-                FailureAttempt(occurred_at=NOW.replace(day=22), error="converter exited 1"),
+                FailureAttempt(
+                    occurred_at=NOW.replace(day=21), error="converter exited 1"
+                ),
+                FailureAttempt(
+                    occurred_at=NOW.replace(day=22), error="converter exited 1"
+                ),
             ]
         }
     )
-    fake_materializer = FakeMaterializer(fixtures={target.input_url: fixture_for(target)})
+    fake_materializer = FakeMaterializer(
+        fixtures={target.input_url: fixture_for(target)}
+    )
     marker = expected_markdown(tmp_path, target).with_suffix(".fixme.txt")
     observed_temp_paths: list[Path] = []
     original_replace = Path.replace
@@ -476,10 +511,14 @@ async def test_third_failure_writes_fixme_atomically_and_clears_counter(
 
 
 @pytest.mark.asyncio
-async def test_converter_must_materialize_output(tmp_path: Path, state: PipelineState) -> None:
+async def test_converter_must_materialize_output(
+    tmp_path: Path, state: PipelineState
+) -> None:
     target = paper("arxiv:1", input_format="html")
     batch = Batch(papers=(target,), estimated_cost=1)
-    fake_materializer = FakeMaterializer(fixtures={target.input_url: fixture_for(target)})
+    fake_materializer = FakeMaterializer(
+        fixtures={target.input_url: fixture_for(target)}
+    )
 
     with pytest.raises(
         InfrastructureError,
@@ -505,7 +544,9 @@ async def test_marker_output_is_moved_from_marker_contract_location(
 ) -> None:
     target = paper("ss:2", input_format="pdf")
     batch = Batch(papers=(target,), estimated_cost=1)
-    fake_materializer = FakeMaterializer(fixtures={target.input_url: fixture_for(target)})
+    fake_materializer = FakeMaterializer(
+        fixtures={target.input_url: fixture_for(target)}
+    )
 
     result = await convert_batch(
         batch,
@@ -533,8 +574,12 @@ async def test_infrastructure_failure_cleans_successful_outputs_and_leaves_backl
     state = PipelineState(
         failures={
             successful.identifier: [
-                FailureAttempt(occurred_at=NOW.replace(day=21), error="converter exited 1"),
-                FailureAttempt(occurred_at=NOW.replace(day=22), error="converter exited 1"),
+                FailureAttempt(
+                    occurred_at=NOW.replace(day=21), error="converter exited 1"
+                ),
+                FailureAttempt(
+                    occurred_at=NOW.replace(day=22), error="converter exited 1"
+                ),
             ]
         }
     )
@@ -560,7 +605,9 @@ async def test_infrastructure_failure_cleans_successful_outputs_and_leaves_backl
         )
 
     assert not expected_markdown(tmp_path, successful).exists()
-    assert not expected_markdown(tmp_path, successful).with_suffix(".fixme.txt").exists()
+    assert (
+        not expected_markdown(tmp_path, successful).with_suffix(".fixme.txt").exists()
+    )
     assert infer_backlog(batch.papers, tmp_path).pending == batch.papers
     assert state == initial_state
     assert not (tmp_path / ".convert-batch").exists()
@@ -572,7 +619,9 @@ async def test_unexpected_task_failure_is_wrapped_as_infrastructure_error(
 ) -> None:
     target = paper("arxiv:1", input_format="html")
     batch = Batch(papers=(target,), estimated_cost=1)
-    fake_materializer = FakeMaterializer(fixtures={target.input_url: fixture_for(target)})
+    fake_materializer = FakeMaterializer(
+        fixtures={target.input_url: fixture_for(target)}
+    )
 
     with pytest.raises(
         InfrastructureError,
@@ -605,7 +654,13 @@ def _write_converter_output(argv: Sequence[str], input_path: Path) -> None:
         output_dir = Path(argv[3])
         output = output_dir / input_path.stem / f"{input_path.stem}.md"
     else:
-        output = Path(next(arg.removeprefix("--output=") for arg in argv if arg.startswith("--output=")))
+        output = Path(
+            next(
+                arg.removeprefix("--output=")
+                for arg in argv
+                if arg.startswith("--output=")
+            )
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         f"# converted {input_path.suffix}\n",

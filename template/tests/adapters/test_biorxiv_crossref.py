@@ -115,7 +115,9 @@ async def test_crossref_uses_opaque_cursor_and_prefers_html_conversion_input(
     assert paper.identifier == "doi:10.1000/fixture"
     assert first_page.next_cursor
     assert first_page.next_cursor != "cursor-2"
-    assert tuple(record.source_id for record in second_page.records) == ("10.1000/fixture-2",)
+    assert tuple(record.source_id for record in second_page.records) == (
+        "10.1000/fixture-2",
+    )
     assert recording_client.requests[1].url.params["cursor"] == "cursor-2"
 
 
@@ -176,10 +178,14 @@ async def test_crossref_local_truncation_on_final_page_resumes_without_skip_or_d
         config=config,
     )
 
-    assert tuple(record.source_id for record in first_page.records) == ("10.1000/fixture-local-1",)
+    assert tuple(record.source_id for record in first_page.records) == (
+        "10.1000/fixture-local-1",
+    )
     assert first_page.next_cursor
     assert first_page.capped is True
-    assert tuple(record.source_id for record in second_page.records) == ("10.1000/fixture-local-2",)
+    assert tuple(record.source_id for record in second_page.records) == (
+        "10.1000/fixture-local-2",
+    )
     assert second_page.next_cursor is None
     assert second_page.capped is True
 
@@ -228,10 +234,10 @@ async def test_biorxiv_keeps_valid_records_and_surfaces_malformed_neighbors(
         config=biorxiv_config,
     )
 
-    assert tuple(record.source_id for record in page.records) == ("10.1101/2024.01.02.123456",)
-    assert page.permanent_errors == (
-        "bioRxiv record lacks DOI, title, or date",
+    assert tuple(record.source_id for record in page.records) == (
+        "10.1101/2024.01.02.123456",
     )
+    assert page.permanent_errors == ("bioRxiv record lacks DOI, title, or date",)
 
 
 @pytest.mark.asyncio
@@ -325,7 +331,9 @@ async def test_invalid_provider_is_rejected_before_fetch(
             ),
             cursor=None,
             client=crossref_client,
-            config=crossref_config.model_copy(update={"filters": {"provider": "medrxiv"}}),
+            config=crossref_config.model_copy(
+                update={"filters": {"provider": "medrxiv"}}
+            ),
         )
 
 

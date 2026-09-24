@@ -158,7 +158,9 @@ def client_factory(
 
     def build(deadline: Deadline) -> TrackingClient:
         deadlines.append(deadline)
-        client = TrackingClient(config=config, deadline=deadline, seed_events=seed_events)
+        client = TrackingClient(
+            config=config, deadline=deadline, seed_events=seed_events
+        )
         created.append(client)
         return client
 
@@ -166,13 +168,17 @@ def client_factory(
 
 
 @pytest.mark.asyncio
-async def test_fetch_uses_source_windows_continues_after_zero_output_and_clears_completed_cursor() -> None:
+async def test_fetch_uses_source_windows_continues_after_zero_output_and_clears_completed_cursor() -> (
+    None
+):
     config = pipeline_config(adapter_config("arxiv", lookback_days=7))
     state = PipelineState(cursors={"arxiv": "opaque-start"})
     adapter = RecordingAdapter(
         "arxiv",
         pages=[
-            FetchPage(records=(), next_cursor="opaque-mid", capped=False, permanent_errors=()),
+            FetchPage(
+                records=(), next_cursor="opaque-mid", capped=False, permanent_errors=()
+            ),
             FetchPage(
                 records=(source_record("arxiv", "2401.00001"),),
                 next_cursor="opaque-final",
@@ -247,8 +253,12 @@ async def test_fetch_persists_cursor_and_marks_result_cap_without_completing() -
 
 
 @pytest.mark.asyncio
-async def test_fetch_raises_when_adapter_returns_more_records_than_remaining_budget() -> None:
-    config = pipeline_config(adapter_config("arxiv", lookback_days=7, max_results=3, page_size=2))
+async def test_fetch_raises_when_adapter_returns_more_records_than_remaining_budget() -> (
+    None
+):
+    config = pipeline_config(
+        adapter_config("arxiv", lookback_days=7, max_results=3, page_size=2)
+    )
     adapter = RecordingAdapter(
         "arxiv",
         pages=[
@@ -286,8 +296,12 @@ async def test_fetch_raises_when_adapter_returns_more_records_than_remaining_bud
 
 
 @pytest.mark.asyncio
-async def test_fetch_passes_remaining_budget_to_adapter_and_preserves_page_two_continuation() -> None:
-    config = pipeline_config(adapter_config("arxiv", lookback_days=7, max_results=3, page_size=2))
+async def test_fetch_passes_remaining_budget_to_adapter_and_preserves_page_two_continuation() -> (
+    None
+):
+    config = pipeline_config(
+        adapter_config("arxiv", lookback_days=7, max_results=3, page_size=2)
+    )
     adapter = RecordingAdapter(
         "arxiv",
         pages=[
@@ -312,7 +326,10 @@ async def test_fetch_passes_remaining_budget_to_adapter_and_preserves_page_two_c
 
     result = await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
 
-    assert [(cfg.page_size, cfg.max_results) for cfg in adapter.configs] == [(2, 3), (1, 1)]
+    assert [(cfg.page_size, cfg.max_results) for cfg in adapter.configs] == [
+        (2, 3),
+        (1, 1),
+    ]
     assert tuple(record.source_id for record in result.records) == (
         "2401.00001",
         "2401.00002",
@@ -328,7 +345,9 @@ async def test_fetch_passes_remaining_budget_to_adapter_and_preserves_page_two_c
 
 
 @pytest.mark.asyncio
-async def test_fetch_enforces_page_cap_and_uses_configured_adapter_order_under_one_deadline() -> None:
+async def test_fetch_enforces_page_cap_and_uses_configured_adapter_order_under_one_deadline() -> (
+    None
+):
     config = pipeline_config(
         adapter_config("dblp", lookback_days=3, max_pages=1),
         adapter_config("arxiv", lookback_days=7),
@@ -385,14 +404,18 @@ async def test_fetch_enforces_page_cap_and_uses_configured_adapter_order_under_o
 
 
 @pytest.mark.asyncio
-async def test_infrastructure_failure_aborts_fetching_and_closes_current_client() -> None:
+async def test_infrastructure_failure_aborts_fetching_and_closes_current_client() -> (
+    None
+):
     config = pipeline_config(
         adapter_config("arxiv", lookback_days=7),
         adapter_config("dblp", lookback_days=3),
     )
     failing = RecordingAdapter(
         "arxiv",
-        failure=InfrastructureError("request retries exhausted: https://example.test/arxiv"),
+        failure=InfrastructureError(
+            "request retries exhausted: https://example.test/arxiv"
+        ),
     )
     skipped = RecordingAdapter(
         "dblp",
@@ -408,7 +431,9 @@ async def test_infrastructure_failure_aborts_fetching_and_closes_current_client(
     factory, clients, _ = client_factory(config.fetch)
 
     with pytest.raises(InfrastructureError, match="request retries exhausted"):
-        await fetch_all(config, PipelineState(), {"arxiv": failing, "dblp": skipped}, factory, NOW)
+        await fetch_all(
+            config, PipelineState(), {"arxiv": failing, "dblp": skipped}, factory, NOW
+        )
 
     assert len(clients) == 1
     assert clients[0].closed is True

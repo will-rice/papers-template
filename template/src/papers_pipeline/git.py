@@ -3,8 +3,17 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Protocol
 
 from papers_pipeline.errors import CommitCompletedError, InfrastructureError
+
+
+class GitOperations(Protocol):
+    def commit(self, paths: Sequence[Path], message: str) -> str | None: ...
+
+    def assert_clean(self, paths: Sequence[Path]) -> None: ...
+
+    def clear_staging(self, paths: Sequence[Path]) -> None: ...
 
 
 class GitRepository:
@@ -94,11 +103,7 @@ class GitRepository:
                 ["git", "diff", "--cached", "--name-only", "-z", "--", *relative],
                 cwd=self.root,
             )
-            staged = [
-                path.decode()
-                for path in staged_output.split(b"\0")
-                if path
-            ]
+            staged = [path.decode() for path in staged_output.split(b"\0") if path]
             if not staged:
                 return
             head = subprocess.run(

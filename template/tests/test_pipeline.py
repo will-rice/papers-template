@@ -107,7 +107,9 @@ class FakeRunner(CommandRunner):
         identifier = Path(argv[1]).stem.split(":", 1)[-1]
         if identifier in self.paper_failures:
             raise PaperError("bad document")
-        output = Path(next(arg.split("=", 1)[1] for arg in argv if arg.startswith("--output=")))
+        output = Path(
+            next(arg.split("=", 1)[1] for arg in argv if arg.startswith("--output="))
+        )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(f"# {identifier}\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -135,7 +137,9 @@ class RecordingGit:
         return f"commit-{len(self.messages)}"
 
 
-def make_paths(tmp_path: Path, *, max_batches: int = 1, max_papers: int = 2) -> PipelinePaths:
+def make_paths(
+    tmp_path: Path, *, max_batches: int = 1, max_papers: int = 2
+) -> PipelinePaths:
     config = {
         "repository": {
             "name": "Test",
@@ -189,7 +193,7 @@ def make_paths(tmp_path: Path, *, max_batches: int = 1, max_papers: int = 2) -> 
 def dependencies(
     adapter: FakeAdapter,
     runner: FakeRunner,
-    git: RecordingGit,
+    git: RecordingGit | GitRepository,
 ) -> Dependencies:
     return Dependencies(
         environ={},
@@ -197,14 +201,16 @@ def dependencies(
         client_factory=lambda _deadline: FakeClient(),  # type: ignore[arg-type,return-value]
         materializer=FakeMaterializer(),
         runner=runner,
-        git=git,  # type: ignore[arg-type]
+        git=git,
         now=lambda: NOW,
         monotonic=lambda: 1.0,
     )
 
 
 @pytest.mark.asyncio
-async def test_inventory_commit_precedes_consistent_batch_commit(tmp_path: Path) -> None:
+async def test_inventory_commit_precedes_consistent_batch_commit(
+    tmp_path: Path,
+) -> None:
     paths = make_paths(tmp_path)
     git = RecordingGit()
     runner = FakeRunner(paper_failures={"bad"})
@@ -290,18 +296,21 @@ async def test_completed_inventory_commit_is_not_rolled_back_or_retried(
     monkeypatch.setattr(subprocess, "check_output", real_check_output)
 
     assert paths.inventory.exists()
-    assert real_check_output(
-        [
-            "git",
-            "status",
-            "--short",
-            "--",
-            paths.inventory.name,
-            paths.state.name,
-        ],
-        cwd=tmp_path,
-        text=True,
-    ).strip() == ""
+    assert (
+        real_check_output(
+            [
+                "git",
+                "status",
+                "--short",
+                "--",
+                paths.inventory.name,
+                paths.state.name,
+            ],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+        == ""
+    )
 
     await run_nightly(
         paths,
@@ -420,6 +429,7 @@ async def test_infrastructure_failure_summarizes_without_batch_commit(
         )
 
     assert git.messages == ["chore: update paper inventory"]
+    assert paths.summary is not None
     assert "infrastructure failure: disk exhausted" in paths.summary.read_text()
 
 
@@ -559,11 +569,14 @@ def test_git_repository_commits_only_exact_changed_paths_and_deletions(
         text=True,
     ).splitlines()
     assert changed == ["deleted.txt", "kept.txt"]
-    assert subprocess.check_output(
-        ["git", "status", "--short"],
-        cwd=tmp_path,
-        text=True,
-    ).strip() == "M unrelated.txt"
+    assert (
+        subprocess.check_output(
+            ["git", "status", "--short"],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+        == "M unrelated.txt"
+    )
 
 
 def test_git_repository_recovers_sha_after_post_commit_rev_parse_failure(
@@ -601,22 +614,31 @@ def test_git_repository_recovers_sha_after_post_commit_rev_parse_failure(
     duplicate = repository.commit([tracked], "duplicate retry")
 
     assert rev_parse_calls >= 2
-    assert commit == real_check_output(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=tmp_path,
-        text=True,
-    ).strip()
+    assert (
+        commit
+        == real_check_output(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+    )
     assert duplicate is None
-    assert real_check_output(
-        ["git", "rev-list", "--count", "HEAD"],
-        cwd=tmp_path,
-        text=True,
-    ).strip() == "2"
-    assert real_check_output(
-        ["git", "status", "--short"],
-        cwd=tmp_path,
-        text=True,
-    ).strip() == ""
+    assert (
+        real_check_output(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+        == "2"
+    )
+    assert (
+        real_check_output(
+            ["git", "status", "--short"],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+        == ""
+    )
 
 
 def test_git_repository_rejects_dirty_relevant_paths_but_allows_unrelated_changes(

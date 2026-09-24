@@ -1,11 +1,56 @@
 from pathlib import Path
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import warnings
 
 from copier import run_copy
-import yaml  # type: ignore[import-untyped]
+from copier.errors import DirtyLocalWarning
+import yaml
+
+
+def _git(repository: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _clean_template_source(source: Path) -> str:
+    source.mkdir()
+    tracked = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "copier.yml",
+            "template",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    for relative in tracked:
+        if not Path(relative).is_file():
+            continue
+        target = source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(relative, target)
+
+    _git(source, "init", "--quiet")
+    _git(source, "config", "user.name", "Template Test")
+    _git(source, "config", "user.email", "template@example.test")
+    _git(source, "add", ".")
+    _git(source, "commit", "--quiet", "-m", "test template")
+    return _git(source, "rev-parse", "HEAD")
 
 
 def test_template_renders_python_package(tmp_path: Path) -> None:
@@ -124,3 +169,47 @@ def test_template_renders_protected_state_files(tmp_path: Path) -> None:
         "identifier,title,abstract,authors,published,url,source,input_format,input_url,categories,doi,arxiv_id\n"
     )
     assert state_file.read_text() == "cursors: {}\nfailures: {}\n"
+
+
+def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:
+    source = tmp_path / "template-source"
+    source_ref = _clean_template_source(source)
+    destination = tmp_path / "sample-papers"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DirtyLocalWarning)
+        run_copy(
+            str(source),
+            destination,
+            data={
+                "project_name": "Sample Papers",
+                "project_slug": "sample-papers",
+                "topic_description": "sample topic",
+                "template_version": "0.1.0",
+            },
+            vcs_ref=source_ref,
+            defaults=True,
+            unsafe=True,
+        )
+
+    _git(destination, "init", "--quiet")
+    _git(destination, "add", ".")
+    environment = os.environ.copy()
+    environment["UV_OFFLINE"] = "true"
+    subprocess.run(
+        ["uv", "sync", "--locked", "--extra", "dev"],
+        cwd=destination,
+        env=environment,
+        check=True,
+    )
+    subprocess.run(
+        ["uv", "run", "pre-commit", "run", "--all-files"],
+        cwd=destination,
+        env=environment,
+        check=True,
+    )
+    subprocess.run(
+        ["uv", "run", "pytest"],
+        cwd=destination,
+        env=environment,
+        check=True,
+    )

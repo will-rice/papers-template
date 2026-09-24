@@ -18,7 +18,9 @@ from .contract import assert_adapter_contract
 async def test_huggingface_contract(
     huggingface_client: RequestClient, huggingface_config: AdapterConfig
 ) -> None:
-    await assert_adapter_contract(HuggingFaceAdapter(), huggingface_client, huggingface_config)
+    await assert_adapter_contract(
+        HuggingFaceAdapter(), huggingface_client, huggingface_config
+    )
 
 
 @pytest.mark.asyncio
@@ -77,7 +79,9 @@ async def test_huggingface_max_pages_sets_capped_without_dropping_cursor(
         ),
         cursor=first_page.next_cursor,
         client=huggingface_client,
-        config=huggingface_config.model_copy(update={"max_pages": 2, "max_results": 10}),
+        config=huggingface_config.model_copy(
+            update={"max_pages": 2, "max_results": 10}
+        ),
     )
 
     assert page.next_cursor
@@ -95,7 +99,9 @@ async def test_huggingface_max_results_sets_capped_without_dropping_cursor(
         ),
         cursor=None,
         client=huggingface_client,
-        config=huggingface_config.model_copy(update={"max_pages": 10, "max_results": 1}),
+        config=huggingface_config.model_copy(
+            update={"max_pages": 10, "max_results": 1}
+        ),
     )
 
     assert tuple(record.source_id for record in page.records) == ("2401.00001",)
@@ -152,7 +158,8 @@ async def test_huggingface_keeps_valid_records_and_surfaces_malformed_entries(
 
 @pytest.mark.asyncio
 async def test_huggingface_all_out_of_window_page_preserves_progress_for_continuation(
-    huggingface_out_of_window_only_client: RequestClient, huggingface_config: AdapterConfig
+    huggingface_out_of_window_only_client: RequestClient,
+    huggingface_config: AdapterConfig,
 ) -> None:
     adapter = HuggingFaceAdapter()
     first_page = await adapter.fetch(
@@ -193,7 +200,9 @@ async def test_huggingface_malformed_only_page_counts_toward_max_results(
         ),
         cursor=None,
         client=huggingface_malformed_only_client,
-        config=huggingface_config.model_copy(update={"max_pages": 10, "max_results": 1}),
+        config=huggingface_config.model_copy(
+            update={"max_pages": 10, "max_results": 1}
+        ),
     )
 
     assert page.records == ()

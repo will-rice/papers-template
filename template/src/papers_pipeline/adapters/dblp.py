@@ -37,7 +37,9 @@ class DblpAdapter:
         )
         hits = _payload_hits(text)
         parsed_records, errors = collect_records(hits, self._record)
-        records = tuple(record for record in parsed_records if _within_window(record, window))
+        records = tuple(
+            record for record in parsed_records if _within_window(record, window)
+        )
         if not hits:
             return FetchPage(
                 records=records,
@@ -70,10 +72,14 @@ class DblpAdapter:
         if not isinstance(info, dict):
             raise PaperError("dblp record missing info object: <unknown>")
 
-        identifier = _required_text(info.get("key"), field="key", identifier="<unknown>")
+        identifier = _required_text(
+            info.get("key"), field="key", identifier="<unknown>"
+        )
         title = _required_text(info.get("title"), field="title", identifier=identifier)
         published = _required_year(info.get("year"), identifier=identifier)
-        input_url = _electronic_url(info.get("ee"), info.get("url"), identifier=identifier)
+        input_url = _electronic_url(
+            info.get("ee"), info.get("url"), identifier=identifier
+        )
         return SourceRecord(
             source=self.name,
             source_id=identifier,
@@ -125,7 +131,9 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
         data = json.loads(decoded.decode("utf-8"))
     except (ValueError, json.JSONDecodeError) as error:
-        raise InfrastructureError(f"invalid dblp continuation cursor: {cursor}") from error
+        raise InfrastructureError(
+            f"invalid dblp continuation cursor: {cursor}"
+        ) from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid dblp continuation cursor: {cursor}")
 

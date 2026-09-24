@@ -144,7 +144,9 @@ class DownloadingMaterializer:
         if parts.scheme in {"", "file"}:
             local_path = Path(parts.path)
             if not local_path.exists():
-                raise InfrastructureError(f"conversion input missing: {paper.input_url}")
+                raise InfrastructureError(
+                    f"conversion input missing: {paper.input_url}"
+                )
             return MaterializedInput(local_path=local_path)
         if parts.scheme not in {"http", "https"}:
             raise InfrastructureError(
@@ -152,7 +154,9 @@ class DownloadingMaterializer:
             )
 
         suffix = Path(parts.path).suffix or _default_suffix(paper)
-        target = root / "inputs" / f"{_materialized_name(paper, paper.input_url)}{suffix}"
+        target = (
+            root / "inputs" / f"{_materialized_name(paper, paper.input_url)}{suffix}"
+        )
         payload = await self._downloader(paper.input_url, _CONVERSION_TIMEOUT)
         try:
             _atomic_write_bytes(target, payload)
@@ -245,9 +249,13 @@ async def convert_batch(
                 raise InfrastructureError(
                     f"converter reported success without output: {paper.identifier}"
                 )
-            return _PreparedConversion(paper=paper, staged_output=staged_output, error=None)
+            return _PreparedConversion(
+                paper=paper, staged_output=staged_output, error=None
+            )
         except PaperError as error:
-            return _PreparedConversion(paper=paper, staged_output=None, error=str(error))
+            return _PreparedConversion(
+                paper=paper, staged_output=None, error=str(error)
+            )
         finally:
             if materialized is not None:
                 _cleanup_paths(materialized.cleanup_paths)
@@ -275,7 +283,10 @@ async def convert_batch(
                     ) from error
 
         succeeded = _promote_successes(results, root)
-        failures = {identifier: list(attempts) for identifier, attempts in state.failures.items()}
+        failures = {
+            identifier: list(attempts)
+            for identifier, attempts in state.failures.items()
+        }
         failed: list[PaperConversion] = []
         promoted: list[Path] = []
 
@@ -284,7 +295,9 @@ async def convert_batch(
                 failures.pop(result.paper.identifier, None)
                 continue
 
-            failed.append(PaperConversion(paper=result.paper, output=None, error=result.error))
+            failed.append(
+                PaperConversion(paper=result.paper, output=None, error=result.error)
+            )
             attempts = [
                 *failures.get(result.paper.identifier, []),
                 FailureAttempt(occurred_at=now, error=result.error),
@@ -331,8 +344,10 @@ async def _download_bytes(url: str, timeout: float) -> bytes:
             f"conversion input redirect HTTP {response.status_code}: {url}"
         )
     if response.is_error:
-        raise InfrastructureError(f"conversion input HTTP {response.status_code}: {url}")
-    return response.content
+        raise InfrastructureError(
+            f"conversion input HTTP {response.status_code}: {url}"
+        )
+    return bytes(response.content)
 
 
 def _materialized_name(paper: Paper, input_url: str) -> str:

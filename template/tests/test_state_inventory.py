@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 from papers_pipeline.inventory import read_inventory, write_inventory
@@ -44,6 +45,7 @@ def test_inventory_handles_empty_csv(tmp_path: Path) -> None:
 
 def test_state_round_trip_is_atomic_and_only_stores_state_fields(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / ".papers-state.yml"
     state = PipelineState(
@@ -68,11 +70,8 @@ def test_state_round_trip_is_atomic_and_only_stores_state_fields(
         assert yaml.safe_load(temp_path.read_text()) == state.model_dump(mode="json")
         original_replace(src, dst)
 
-    try:
-        os.replace = spy_replace  # type: ignore[assignment]
-        save_state(path, state)
-    finally:
-        os.replace = original_replace  # type: ignore[assignment]
+    monkeypatch.setattr(os, "replace", spy_replace)
+    save_state(path, state)
 
     assert observed_temp_paths == [path.with_suffix(".yml.tmp")]
     assert load_state(path) == state

@@ -143,7 +143,9 @@ def _reindex(
             bibliographic_index[bibliographic_key] = cluster_id
 
 
-def _identifier(*, source: str, source_id: str, doi: str | None, arxiv_id: str | None) -> str:
+def _identifier(
+    *, source: str, source_id: str, doi: str | None, arxiv_id: str | None
+) -> str:
     if arxiv_id:
         return f"arxiv:{arxiv_id.casefold()}"
     if doi:
@@ -176,7 +178,9 @@ def _merge_identifier_value(preferred: str | None, other: str | None) -> str | N
     return preferred or other
 
 
-def _merged_identifier(preferred: Paper, *, doi: str | None, arxiv_id: str | None) -> str:
+def _merged_identifier(
+    preferred: Paper, *, doi: str | None, arxiv_id: str | None
+) -> str:
     if arxiv_id:
         return f"arxiv:{arxiv_id}"
     if doi:
