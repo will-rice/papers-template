@@ -262,8 +262,11 @@ def _host_header(host: str, port: int, scheme: str) -> str:
 
 def _classify_response(response: HttpResponse, url: str) -> bytes:
     status = response.status_code
+    # A host refusing one paper (paywall, bot check) fails that paper; failures
+    # are counted per paper and reset on success, so a transient block costs
+    # one attempt instead of stalling every run.
     if status in {401, 403}:
-        raise InfrastructureError(f"conversion input authentication failed: {url}")
+        raise PaperError(f"conversion input HTTP {status}: {url}")
     if status == 408:
         raise InfrastructureError(f"conversion input HTTP 408: {url}")
     if 400 <= status < 500 and status != 429:
