@@ -2,12 +2,13 @@ import base64
 import json
 import re
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from papers_pipeline.adapters.base import FetchPage, FetchWindow, collect_records
 from papers_pipeline.config import AdapterConfig
 from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.http import RequestClient
-from papers_pipeline.models import SourceRecord
+from papers_pipeline.models import InputFormat, SourceRecord
 
 
 class DblpAdapter:
@@ -83,10 +84,15 @@ class DblpAdapter:
             authors=_authors(info.get("authors")),
             published=published,
             url=_scalar_text(info.get("url")) or f"https://dblp.org/rec/{identifier}",
-            input_format="html",
+            input_format=electronic_format(input_url),
             input_url=input_url,
             doi=_first_text(info.get("doi")),
         )
+
+
+def electronic_format(url: str) -> InputFormat:
+    """Electronic editions are HTML pages unless the link is a PDF itself."""
+    return "pdf" if urlsplit(url).path.casefold().endswith(".pdf") else "html"
 
 
 def _within_window(record: SourceRecord, window: FetchWindow) -> bool:
