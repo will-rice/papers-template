@@ -42,3 +42,15 @@
   including missing annotations/stubs and the two known unused-ignore errors.
 - The two existing smoke tests continue to emit `DirtyLocalWarning` while the
   new immutable-source update regression emits none.
+
+## Follow-up hardening
+
+- Extended the ownership regression to cover representative bytes in every
+  protected cache root from `copier.yml`: `.cache`, `.pytest_cache`,
+  `.mypy_cache`, and `.ruff_cache`.
+- Added a direct assertion that the tested protected roots match
+  `_skip_if_exists`, so removing any owned entry now fails the regression.
+- Kept the update path anchored to a real local Git repository and preserved
+  warning-free execution for the update regression itself.
+- Re-verified the focused root suite, Ruff check/format, and strict mypy for
+  the changed test file.

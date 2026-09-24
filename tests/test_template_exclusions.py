@@ -4,6 +4,7 @@ import subprocess
 import warnings
 
 from copier import run_copy, run_update
+import yaml  # type: ignore[import-untyped]
 from copier.errors import DirtyLocalWarning
 
 
@@ -112,6 +113,9 @@ def test_copier_update_preserves_repository_owned_data(tmp_path: Path) -> None:
         ".cache/parsers/document.bin": b"\x01parser cache\r\n",
         ".cache/models/model.bin": b"\x02model cache\n",
         ".cache/tools/converter.bin": b"\x03tool cache\r\n",
+        ".pytest_cache/marker.bin": b"\x04pytest cache\r\n",
+        ".mypy_cache/marker.bin": b"\x05mypy cache\n",
+        ".ruff_cache/marker.bin": b"\x06ruff cache\r\n",
     }
     for relative, content in protected.items():
         path = destination / relative
@@ -126,6 +130,9 @@ def test_copier_update_preserves_repository_owned_data(tmp_path: Path) -> None:
     assert {
         relative: (destination / relative).read_bytes() for relative in protected
     } == protected
+    assert {Path(relative).parts[0] for relative in protected} == set(
+        yaml.safe_load(Path("copier.yml").read_text())["_skip_if_exists"]
+    )
     assert (
         "updated repository plugin accepted paper"
         in (destination / "topic_plugin.py").read_text()
