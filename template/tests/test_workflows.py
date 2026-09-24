@@ -183,7 +183,12 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _nightly_scenario(tmp_path: Path, *, dirty_path: str | None) -> tuple[int, int]:
+def _nightly_scenario(
+    tmp_path: Path,
+    *,
+    dirty_path: str | None,
+    concurrent_push: bool = False,
+) -> tuple[int, int]:
     origin = tmp_path / "origin.git"
     work = tmp_path / "work"
     fake_bin = tmp_path / "bin"
@@ -199,6 +204,19 @@ def _nightly_scenario(tmp_path: Path, *, dirty_path: str | None) -> tuple[int, i
     _git(work, "commit", "-q", "-m", "initial")
     _git(work, "remote", "add", "origin", str(origin))
     _git(work, "push", "-q", "-u", "origin", "main")
+
+    concurrent_command = ""
+    if concurrent_push:
+        other = tmp_path / "other"
+        _git(tmp_path, "clone", "-q", str(origin), str(other))
+        _git(other, "config", "user.name", "Other")
+        _git(other, "config", "user.email", "other@example.test")
+        concurrent_command = (
+            f'printf "merged\\n" > "{other}/code.txt"\n'
+            f'git -C "{other}" add code.txt\n'
+            f'git -C "{other}" commit -q -m "concurrent merge"\n'
+            f'git -C "{other}" push -q origin main\n'
+        )
 
     fake_bin.mkdir()
     uv = fake_bin / "uv"
@@ -217,6 +235,7 @@ def _nightly_scenario(tmp_path: Path, *, dirty_path: str | None) -> tuple[int, i
         'printf "committed\\n" >> papers.csv\n'
         "git add papers.csv\n"
         'git commit -q -m "pipeline batch"\n'
+        f"{concurrent_command}"
         f"{dirty_command}"
         "exit 23\n",
         encoding="utf-8",
@@ -452,3 +471,11 @@ def test_template_update_is_noop_when_release_is_current(
     )
     assert completed.returncode == 0
     assert "already uses template release" in completed.stdout
+
+
+def test_nightly_rebases_onto_concurrent_main_updates(tmp_path: Path) -> None:
+    status, remote_count = _nightly_scenario(
+        tmp_path, dirty_path=None, concurrent_push=True
+    )
+    assert status == 23
+    assert remote_count == 3
