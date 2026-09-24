@@ -175,10 +175,12 @@ def test_migration_produces_generated_template_corpus(
         f" and [same year]({pending.name}).\n",
     )
     assert load_state(legacy_repo / ".papers-state.yml").continuations == {}
-    # Moves are staged as renames so history follows each paper.
-    assert "R100\tpapers/2023/s2:abc123.md" in git(
-        legacy_repo, "diff", "--cached", "-M", "--name-status"
-    )
+    # The moves are committed alone as exact renames so history follows each
+    # paper; rewrites stay uncommitted on top.
+    moved = git(legacy_repo, "show", "-M", "--name-status", "--format=%s", "HEAD")
+    assert moved.startswith("chore: move legacy papers to the template layout\n")
+    assert f"R100\tpapers/2023/s2:abc123.md\tpapers/{scholar.name}" in moved
+    assert f" M papers/{scholar.name}" in git(legacy_repo, "status", "--short")
 
 
 def test_migration_raises_on_semantic_scholar_rate_limit(legacy_repo: Path) -> None:

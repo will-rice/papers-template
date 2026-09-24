@@ -33,9 +33,12 @@ full clone, against an immutable template release:
 2. In the repository, run `uv sync --locked --extra dev`, then
    `uv run python <template>/scripts/migrate_legacy_corpus.py`. It converts
    `papers.csv` to the template schema with the pipeline's own normalization
-   and deduplication, `git mv`s each paper to the path the pipeline expects,
-   rewrites in-corpus links, replaces legacy front matter with the pipeline's,
-   removes legacy indexes, and writes an empty `.papers-state.yml`.
+   and deduplication, `git mv`s each paper to the path the pipeline expects
+   and removes legacy indexes, and commits those moves alone so every paper
+   keeps its history as an exact rename. It then rewrites in-corpus links,
+   replaces legacy front matter with the pipeline's, and writes an empty
+   `.papers-state.yml`, leaving those changes uncommitted for review. Run it on
+   a branch whose other changes (the Copier render) are not yet staged.
    Papers without markdown get inputs the nightly can convert: arXiv and
    bioRxiv PDFs derived offline, legacy URLs ending in `.pdf` as PDFs, and,
    for Semantic Scholar landing pages, one Graph API batch lookup per 500
