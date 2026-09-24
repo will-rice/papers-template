@@ -3,11 +3,10 @@ set -euo pipefail
 
 template_ref="${TEMPLATE_REF-}"
 release_pattern='^v?[0-9]+\.[0-9]+\.[0-9]+$'
-if [[ -z "$template_ref" || ! "$template_ref" =~ $release_pattern ]]; then
+if [[ ! "$template_ref" =~ $release_pattern ]]; then
   echo "TEMPLATE_REF must be an immutable release tag (for example, v1.2.3)" >&2
   exit 2
 fi
-: "${TEMPLATE_REF:?TEMPLATE_REF must name an immutable template release}"
 
 answers_file=".copier-answers.yml"
 if [[ ! -f "$answers_file" ]]; then
@@ -40,30 +39,23 @@ if [[ "$newest_version" != "$target_version" ]]; then
   exit 2
 fi
 
-if ! uv run copier update \
+uv run copier update \
   --answers-file .copier-answers.yml \
   --vcs-ref "$template_ref" \
   --defaults \
   --trust \
-  --conflict rej; then
-  echo "Copier update failed for template release $template_ref" >&2
-  exit 1
-fi
+  --conflict rej
 
 if find . -type f -name '*.rej' -print -quit | grep -q .; then
   echo "Copier update left conflicts (.rej files); refusing to continue" >&2
   exit 1
 fi
-if ! git diff --check; then
-  echo "Copier update left conflicts or invalid whitespace; refusing to continue" >&2
-  exit 1
-fi
+git diff --check
 
 uv lock
+# Provision dev tools online; validation below must not touch the network.
+uv sync --locked --extra dev
 export UV_OFFLINE=1
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
-unset http_proxy https_proxy all_proxy no_proxy
-uv sync --locked --offline --extra dev
 uv run papers-pipeline validate --config papers.yml --config-only
 uv run pre-commit run --all-files
 uv run pytest

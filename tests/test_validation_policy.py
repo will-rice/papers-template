@@ -58,8 +58,6 @@ def test_smoke_provisions_locked_dependencies_before_offline_validation() -> Non
     assert "UV_OFFLINE=1 uv sync" not in smoke
     assert '["uv", "sync", "--locked", "--extra", "dev"]' in smoke_test
     assert 'offline_environment["UV_OFFLINE"] = "1"' in smoke_test
-    assert "uv sync --locked --offline --extra dev" in update
-    assert update.index("uv lock") < update.index("export UV_OFFLINE=1")
-    assert update.index("export UV_OFFLINE=1") < update.index(
-        "uv sync --locked --offline"
+    assert update.index("uv sync --locked --extra dev") < update.index(
+        "export UV_OFFLINE=1"
     )

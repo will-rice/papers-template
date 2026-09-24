@@ -405,7 +405,6 @@ def test_template_update_validates_release_and_handles_noop_and_conflicts() -> N
     script = SCRIPTS / "template-update.sh"
     text = script.read_text(encoding="utf-8")
     assert script.stat().st_mode & stat.S_IXUSR
-    assert "TEMPLATE_REF:?" in text
     assert "immutable release tag" in text
     assert ".copier-answers.yml" in text
     assert "_commit:" in text
@@ -413,15 +412,18 @@ def test_template_update_validates_release_and_handles_noop_and_conflicts() -> N
     assert "updated=false" in text
     assert "updated=true" in text
     assert "newer than current release" in text
-    assert "Copier update failed" in text
     assert "Copier update left conflicts" in text
     assert "uv run copier update" in text
     assert '--vcs-ref "$template_ref"' in text
     assert "--answers-file .copier-answers.yml" in text
     assert "uv lock" in text
-    assert "uv sync --locked --offline --extra dev" in text
-    assert text.index("uv lock") < text.index("export UV_OFFLINE=1")
-    assert text.index("export UV_OFFLINE=1") < text.index("uv sync --locked --offline")
+    # Dev tools must be provisioned online before validation goes offline.
+    assert (
+        text.index("uv lock")
+        < text.index("uv sync --locked --extra dev")
+        < text.index("export UV_OFFLINE=1")
+        < text.index("pre-commit run --all-files")
+    )
     assert "papers-pipeline validate --config papers.yml" in text
     assert "pre-commit run --all-files" in text
     assert "pytest" in text
