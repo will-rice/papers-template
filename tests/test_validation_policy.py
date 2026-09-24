@@ -47,13 +47,17 @@ def test_pre_commit_configs_use_only_locked_local_tools() -> None:
         ]
 
 
-def test_smoke_and_template_update_validation_use_offline_locked_sync() -> None:
+def test_smoke_provisions_locked_dependencies_before_offline_validation() -> None:
     smoke = (ROOT / "scripts/smoke-test.sh").read_text(encoding="utf-8")
+    smoke_test = (ROOT / "tests/test_copier_smoke.py").read_text(encoding="utf-8")
     update = (ROOT / "template/.github/scripts/template-update.sh").read_text(
         encoding="utf-8"
     )
 
-    assert "UV_OFFLINE=1 uv sync --locked --offline" in smoke
+    assert "uv sync --locked" in smoke
+    assert "UV_OFFLINE=1 uv sync" not in smoke
+    assert '["uv", "sync", "--locked", "--extra", "dev"]' in smoke_test
+    assert 'offline_environment["UV_OFFLINE"] = "1"' in smoke_test
     assert "uv sync --locked --offline --extra dev" in update
     assert update.index("uv lock") < update.index("export UV_OFFLINE=1")
     assert update.index("export UV_OFFLINE=1") < update.index(

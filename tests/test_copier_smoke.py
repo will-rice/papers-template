@@ -203,30 +203,32 @@ def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:
     _git(destination, "add", ".")
     pre_commit_home = tmp_path / "pre-commit-home"
     pre_commit_home.mkdir()
-    environment = {
+    provisioning_environment = os.environ.copy()
+    provisioning_environment.pop("UV_OFFLINE", None)
+    subprocess.run(
+        ["uv", "sync", "--locked", "--extra", "dev"],
+        cwd=destination,
+        env=provisioning_environment,
+        check=True,
+    )
+    offline_environment = {
         key: value
         for key, value in os.environ.items()
         if not key.lower().endswith("_proxy")
     }
-    environment["UV_OFFLINE"] = "1"
-    environment["PRE_COMMIT_HOME"] = str(pre_commit_home)
-    subprocess.run(
-        ["uv", "sync", "--locked", "--offline", "--extra", "dev"],
-        cwd=destination,
-        env=environment,
-        check=True,
-    )
+    offline_environment["UV_OFFLINE"] = "1"
+    offline_environment["PRE_COMMIT_HOME"] = str(pre_commit_home)
     subprocess.run(
         ["uv", "run", "pre-commit", "run", "--all-files"],
         cwd=destination,
-        env=environment,
+        env=offline_environment,
         check=True,
     )
     assert any(pre_commit_home.iterdir())
     subprocess.run(
         ["uv", "run", "pytest"],
         cwd=destination,
-        env=environment,
+        env=offline_environment,
         check=True,
     )
 
