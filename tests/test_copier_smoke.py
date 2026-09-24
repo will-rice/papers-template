@@ -54,20 +54,24 @@ def _clean_template_source(source: Path) -> str:
 
 
 def test_template_renders_python_package(tmp_path: Path) -> None:
+    source = tmp_path / "template-source"
+    source_ref = _clean_template_source(source)
     destination = tmp_path / "sample-papers"
-    run_copy(
-        ".",
-        destination,
-        data={
-            "project_name": 'Sample "Papers": Demo',
-            "project_slug": "sample-papers",
-            "topic_description": 'sample "topic": demo',
-            "template_version": "0.1.0",
-        },
-        vcs_ref="HEAD",
-        defaults=True,
-        unsafe=True,
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DirtyLocalWarning)
+        run_copy(
+            str(source),
+            destination,
+            data={
+                "project_name": 'Sample "Papers": Demo',
+                "project_slug": "sample-papers",
+                "topic_description": 'sample "topic": demo',
+                "template_version": "0.1.0",
+            },
+            vcs_ref=source_ref,
+            defaults=True,
+            unsafe=True,
+        )
     assert (destination / "pyproject.toml").is_file()
     assert (destination / "src/papers_pipeline/__init__.py").is_file()
     assert (destination / "src/papers_pipeline/cli.py").is_file()
@@ -140,26 +144,30 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     }
     answers = (destination / ".copier-answers.yml").read_text()
     parsed_answers = yaml.safe_load(answers)
-    assert parsed_answers["_src_path"] == "."
+    assert Path(parsed_answers["_src_path"]).resolve() == source.resolve()
     assert parsed_answers["_commit"]
     assert "template_version: 0.1.0" in answers
 
 
 def test_template_renders_protected_state_files(tmp_path: Path) -> None:
+    source = tmp_path / "template-source"
+    source_ref = _clean_template_source(source)
     destination = tmp_path / "sample-papers"
-    run_copy(
-        ".",
-        destination,
-        data={
-            "project_name": "Sample Papers",
-            "project_slug": "sample-papers",
-            "topic_description": "sample topic",
-            "template_version": "0.1.0",
-        },
-        vcs_ref="HEAD",
-        defaults=True,
-        unsafe=True,
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DirtyLocalWarning)
+        run_copy(
+            str(source),
+            destination,
+            data={
+                "project_name": "Sample Papers",
+                "project_slug": "sample-papers",
+                "topic_description": "sample topic",
+                "template_version": "0.1.0",
+            },
+            vcs_ref=source_ref,
+            defaults=True,
+            unsafe=True,
+        )
 
     papers_csv = destination / "papers.csv"
     state_file = destination / ".papers-state.yml"
