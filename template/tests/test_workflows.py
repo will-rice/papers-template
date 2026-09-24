@@ -208,7 +208,7 @@ def _nightly_scenario(
     concurrent_command = ""
     if concurrent_push:
         other = tmp_path / "other"
-        _git(tmp_path, "clone", "-q", str(origin), str(other))
+        _git(tmp_path, "clone", "-q", "-b", "main", str(origin), str(other))
         _git(other, "config", "user.name", "Other")
         _git(other, "config", "user.email", "other@example.test")
         concurrent_command = (
