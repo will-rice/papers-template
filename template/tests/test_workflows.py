@@ -289,16 +289,13 @@ def test_nightly_script_is_executable() -> None:
 
 def test_template_update_opens_pr_and_never_pushes_main() -> None:
     data = workflow("template-update.yml")
-    assert data["permissions"] == {
-        "contents": "write",
-        "pull-requests": "write",
-    }
+    assert data["permissions"] == {"contents": "read"}
     assert set(data["on"]) == {"schedule", "workflow_dispatch"}
     assert data["concurrency"] == {
         "group": "template-update",
         "cancel-in-progress": False,
     }
-    assert set(data["jobs"]) == {"update"}
+    assert set(data["jobs"]) == {"validate", "publish"}
     commands = "\n".join(
         step.get("run", "") for job in data["jobs"].values() for step in job["steps"]
     )
@@ -307,14 +304,58 @@ def test_template_update_opens_pr_and_never_pushes_main() -> None:
     assert "git push" not in commands
     assert any(
         "peter-evans/create-pull-request@" in step.get("uses", "")
-        for step in data["jobs"]["update"]["steps"]
+        for step in data["jobs"]["publish"]["steps"]
     )
     update_step = next(
-        step for step in data["jobs"]["update"]["steps"] if step.get("id") == "update"
+        step for step in data["jobs"]["validate"]["steps"] if step.get("id") == "update"
     )
     assert update_step["run"] == ".github/scripts/template-update.sh"
-    pull_request_step = data["jobs"]["update"]["steps"][-1]
-    assert pull_request_step["if"] == "steps.update.outputs.updated == 'true'"
+    publish = data["jobs"]["publish"]
+    assert publish["needs"] == "validate"
+    assert publish["if"] == "needs.validate.outputs.updated == 'true'"
+
+
+def test_template_update_withholds_write_credentials_until_pr_step() -> None:
+    data = workflow("template-update.yml")
+    assert data["permissions"] == {"contents": "read"}
+    assert set(data["jobs"]) == {"validate", "publish"}
+
+    validate = data["jobs"]["validate"]
+    assert "permissions" not in validate
+    release_step = next(
+        step for step in validate["steps"] if step.get("id") == "release"
+    )
+    assert release_step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert all(
+        "GH_TOKEN" not in step.get("env", {})
+        for step in validate["steps"]
+        if step is not release_step
+    )
+
+    publish = data["jobs"]["publish"]
+    assert publish["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+    }
+    pull_request_step = publish["steps"][-1]
+    assert pull_request_step["with"]["token"] == "${{ github.token }}"
+    assert all(
+        "GH_TOKEN" not in step.get("env", {}) and "token" not in step.get("with", {})
+        for step in publish["steps"][:-1]
+    )
+
+    checkout_steps = [
+        step
+        for job in data["jobs"].values()
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert checkout_steps
+    assert all(step["with"]["persist-credentials"] is False for step in checkout_steps)
+    assert validate["steps"][0]["with"]["fetch-depth"] == 0
+    assert validate["steps"][0]["with"]["ref"] == (
+        "${{ github.event.repository.default_branch }}"
+    )
 
 
 def test_template_update_validates_release_and_handles_noop_and_conflicts() -> None:

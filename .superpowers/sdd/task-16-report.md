@@ -50,3 +50,38 @@ independently validates stable release syntax and strict version ordering.
 Already-current repositories emit `updated=false`, so the PR step is skipped.
 Successful validated updates emit `updated=true`. No update path contains
 `git push`; only the SHA-pinned pull-request action can publish changes.
+
+## Credential exposure remediation
+
+- Changed every template-update checkout to `persist-credentials: false` while
+  retaining the default-branch ref and full history needed by Copier.
+- Split validation from publication. The `validate` job has only
+  `contents: read`; release lookup is its sole `GH_TOKEN` consumer, and Copier,
+  hooks, pre-commit, and tests receive no GitHub token or persisted Git
+  credential.
+- The validated index, including new and deleted files, is transferred as a
+  binary patch from the read-only job. The `publish` job applies that patch to
+  the exact validated base SHA and alone receives `contents: write` and
+  `pull-requests: write`.
+- The SHA-pinned create-pull-request action is the only step given an explicit
+  write token. The workflow remains schedule/manual-only and publishes to a
+  dedicated branch, preserving fork isolation and avoiding direct pushes.
+- Added a credential policy regression test covering job permissions,
+  checkout persistence, token placement, release-resolution isolation, and the
+  retained fetch depth/ref.
+
+### Remediation verification
+
+- Credential policy RED: failed on the former workflow-level write permissions.
+- Focused policy tests: `2 passed`.
+- Full workflow suite: `31 passed`.
+- Full rendered-template suite: `221 passed`.
+- Copier smoke suite: `2 passed` with expected dirty-template warnings.
+- Ruff check/format, Bash syntax, YAML parsing, and `git diff --check`: passed.
+
+### Remaining concern
+
+The public release lookup still uses the validation job's read-only
+`GITHUB_TOKEN` to avoid unauthenticated API rate limits. It is scoped to the
+single lookup step and is never available to Copier or repository-controlled
+validation commands.
