@@ -86,12 +86,11 @@ directly.
 
 ## Updating from the template
 
-Set the template repository variable used by the update workflow and run the
-weekly workflow, or wait for its schedule. The workflow resolves an immutable
-release, runs Copier, refreshes the lock, validates configuration, runs
-pre-commit and the offline test suite, and opens an update pull request for
-review. Resolve any `.rej` file as a failed update; never bypass validation or
-push an update directly to `main`.
+Run the weekly workflow, or wait for its schedule. It resolves an immutable
+release from `will-rice/papers-template`, runs Copier, refreshes the lock,
+validates configuration, runs pre-commit and the offline test suite, and opens
+an update pull request for review. Resolve any `.rej` file as a failed update;
+never bypass validation or push an update directly to `main`.
 
 ## Ownership boundary
 

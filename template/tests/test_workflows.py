@@ -376,7 +376,9 @@ def test_template_update_validates_release_and_handles_noop_and_conflicts() -> N
     assert '--vcs-ref "$template_ref"' in text
     assert "--answers-file .copier-answers.yml" in text
     assert "uv lock" in text
-    assert "uv sync --locked --extra dev" in text
+    assert "uv sync --locked --offline --extra dev" in text
+    assert text.index("uv lock") < text.index("export UV_OFFLINE=1")
+    assert text.index("export UV_OFFLINE=1") < text.index("uv sync --locked --offline")
     assert "papers-pipeline validate --config papers.yml" in text
     assert "pre-commit run --all-files" in text
     assert "pytest" in text

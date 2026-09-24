@@ -201,10 +201,17 @@ def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:
 
     _git(destination, "init", "--quiet")
     _git(destination, "add", ".")
-    environment = os.environ.copy()
-    environment["UV_OFFLINE"] = "true"
+    pre_commit_home = tmp_path / "pre-commit-home"
+    pre_commit_home.mkdir()
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.lower().endswith("_proxy")
+    }
+    environment["UV_OFFLINE"] = "1"
+    environment["PRE_COMMIT_HOME"] = str(pre_commit_home)
     subprocess.run(
-        ["uv", "sync", "--locked", "--extra", "dev"],
+        ["uv", "sync", "--locked", "--offline", "--extra", "dev"],
         cwd=destination,
         env=environment,
         check=True,
@@ -215,6 +222,7 @@ def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:
         env=environment,
         check=True,
     )
+    assert any(pre_commit_home.iterdir())
     subprocess.run(
         ["uv", "run", "pytest"],
         cwd=destination,
@@ -260,4 +268,5 @@ def test_generated_readme_documents_operations_and_migration_gate(
     ):
         assert heading in readme
     assert "PDF concurrency is always exactly 1" in readme
+    assert "`will-rice/papers-template`" in readme
     assert "Do not begin a migration" in readme
