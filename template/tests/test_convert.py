@@ -1181,7 +1181,6 @@ async def test_arxiv_papers_convert_from_arxiv_html_before_their_input(
         assert b"Report GitHub Issue" not in runner.inputs[0]
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("input_format", "url", "suffix"),

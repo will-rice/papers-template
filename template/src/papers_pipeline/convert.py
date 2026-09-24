@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from papers_pipeline.batching import Batch, expected_markdown
