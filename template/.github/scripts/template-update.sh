@@ -64,7 +64,7 @@ export UV_OFFLINE=1
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
 unset http_proxy https_proxy all_proxy no_proxy
 uv sync --locked --offline --extra dev
-uv run papers-pipeline validate --config papers.yml
+uv run papers-pipeline validate --config papers.yml --config-only
 uv run pre-commit run --all-files
 uv run pytest
 if [[ -n "${GITHUB_OUTPUT-}" ]]; then

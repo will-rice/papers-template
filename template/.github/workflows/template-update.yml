@@ -95,7 +95,9 @@ jobs:
           name: template-update
       - name: Apply validated update patch
         timeout-minutes: 2
-        run: git apply --index --binary template-update.patch
+        run: |
+          git apply --index --binary template-update.patch
+          rm -f template-update.patch
       - name: Open update pull request
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676
         timeout-minutes: 3
@@ -107,3 +109,16 @@ jobs:
           title: "chore: update papers template"
           body: "Automated Copier update. Schema, pre-commit, and the offline suite passed before this pull request was opened."
           commit-message: "chore: update papers template"
+          add-paths: |
+            .github/**
+            .gitignore
+            .pre-commit-config.yaml
+            .copier-answers.yml
+            README.md
+            papers.schema.json
+            papers.yml
+            pyproject.toml
+            src/**
+            tests/**
+            topic_plugin.py
+            uv.lock

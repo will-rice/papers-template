@@ -87,6 +87,16 @@ def test_all_python_workflows_use_locked_dependencies_and_preflight() -> None:
     assert nightly.index("papers-pipeline validate") < nightly.index("nightly.sh")
 
 
+def test_nightly_provisions_pinned_conversion_and_formatting_tools() -> None:
+    text = (WORKFLOWS / "nightly.yml").read_text(encoding="utf-8")
+    assert "marker-pdf==1.10.1" in text
+    assert "pypandoc-binary==1.15" in text
+    assert "prettier@3.6.2" in text
+    assert "pypandoc.get_pandoc_path()" in text
+    assert '"$HOME/.local/bin" >> "$GITHUB_PATH"' in text
+    assert text.index("marker-pdf==1.10.1") < text.index("papers-pipeline validate")
+
+
 def test_nightly_has_non_overlapping_mutation_concurrency() -> None:
     data = workflow("nightly.yml")
     assert set(data["on"]) == {"schedule", "workflow_dispatch"}
@@ -313,6 +323,20 @@ def test_template_update_opens_pr_and_never_pushes_main() -> None:
     publish = data["jobs"]["publish"]
     assert publish["needs"] == "validate"
     assert publish["if"] == "needs.validate.outputs.updated == 'true'"
+
+
+def test_pr_workflows_remove_downloaded_patches_and_constrain_staging() -> None:
+    template_update = workflow("template-update.yml")["jobs"]["publish"]["steps"]
+    update_pr = template_update[-1]
+    assert "rm -f template-update.patch" in template_update[-2]["run"]
+    assert "template-update.patch" not in update_pr["with"]["add-paths"]
+    assert "src/**" in update_pr["with"]["add-paths"]
+    assert "tests/**" in update_pr["with"]["add-paths"]
+
+    formatting = workflow("format-corpus.yml")["jobs"]["combine"]["steps"]
+    format_pr = formatting[-1]
+    assert "rm -rf patches" in formatting[-2]["run"]
+    assert format_pr["with"]["add-paths"] == "papers/**"
 
 
 def test_template_update_withholds_write_credentials_until_pr_step() -> None:

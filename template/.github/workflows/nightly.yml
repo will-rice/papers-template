@@ -34,6 +34,21 @@ jobs:
       - name: Sync locked environment
         timeout-minutes: 5
         run: uv sync --locked --extra dev
+      - name: Install pinned runtime tools
+        timeout-minutes: 15
+        run: |
+          uv tool install marker-pdf==1.10.1
+          uv pip install --no-deps pypandoc-binary==1.15
+          npm install --global prettier@3.6.2
+          mkdir -p "$HOME/.local/bin"
+          uv run python - <<'PY'
+          from pathlib import Path
+          import pypandoc
+
+          target = Path.home() / ".local/bin/pandoc"
+          target.symlink_to(pypandoc.get_pandoc_path())
+          PY
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Validate configuration
         timeout-minutes: 1
         run: uv run papers-pipeline validate --config papers.yml

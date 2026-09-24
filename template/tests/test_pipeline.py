@@ -204,7 +204,31 @@ def dependencies(
         git=git,
         now=lambda: NOW,
         monotonic=lambda: 1.0,
+        tool_lookup=lambda name: f"/tools/{name}",
     )
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_before_fetch_or_mutation(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    adapter = FakeAdapter([record("never-fetched")])
+    git = RecordingGit()
+    deps = dependencies(adapter, FakeRunner(), git)
+    deps = Dependencies(
+        **{
+            **deps.__dict__,
+            "tool_lookup": lambda name: None if name == "marker_single" else name,
+        }
+    )
+
+    with pytest.raises(
+        InfrastructureError, match="missing required tools: marker_single"
+    ):
+        await run_nightly(paths, deps)
+
+    assert adapter.calls == 0
+    assert git.clean_checks == []
+    assert git.messages == []
 
 
 @pytest.mark.asyncio

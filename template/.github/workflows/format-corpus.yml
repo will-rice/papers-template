@@ -84,9 +84,12 @@ jobs:
       - name: Sync locked environment
         timeout-minutes: 5
         run: uv sync --locked --extra dev
+      - name: Install pinned formatter
+        timeout-minutes: 2
+        run: npm install --global prettier@3.6.2
       - name: Validate configuration
         timeout-minutes: 1
-        run: uv run papers-pipeline validate --config papers.yml
+        run: uv run papers-pipeline validate --config papers.yml --config-only
       - name: Format shard
         timeout-minutes: 15
         env:
@@ -138,6 +141,7 @@ jobs:
               git apply --index "$patch"
             fi
           done < <(find patches -type f -name 'format-*.patch' -print0 | sort -zV)
+          rm -rf patches
       - name: Open formatting pull request
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676
         timeout-minutes: 5
@@ -147,3 +151,4 @@ jobs:
           delete-branch: true
           title: "style: format complete paper corpus"
           commit-message: "style: format complete paper corpus"
+          add-paths: papers/**

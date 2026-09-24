@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import shutil
 import sys
 import time
 from typing import Sequence
@@ -14,20 +15,26 @@ from typing import Sequence
 from papers_pipeline.adapters import build_adapters
 from papers_pipeline.config import load_config
 from papers_pipeline.convert import CommandRunner, DownloadingMaterializer
-from papers_pipeline.errors import ConfigError
+from papers_pipeline.errors import ConfigError, InfrastructureError
 from papers_pipeline.formatting import format_changed, shard_paths
 from papers_pipeline.git import GitRepository
 from papers_pipeline.http import RequestClient
 from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
+from papers_pipeline.preflight import ToolLookup, validate_required_tools
 
 
-def app(argv: Sequence[str] | None = None) -> int:
+def app(
+    argv: Sequence[str] | None = None,
+    *,
+    tool_lookup: ToolLookup = shutil.which,
+) -> int:
     """Run the pipeline CLI."""
 
     parser = argparse.ArgumentParser(prog="papers-pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser("validate")
     validate.add_argument("--config", type=Path, default=Path("papers.yml"))
+    validate.add_argument("--config-only", action="store_true")
     nightly = subparsers.add_parser("nightly")
     nightly.add_argument("--config", type=Path, default=Path("papers.yml"))
     format_corpus = subparsers.add_parser("format-corpus")
@@ -37,9 +44,15 @@ def app(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command == "validate":
         try:
-            load_config(args.config, os.environ)
+            config = load_config(args.config, os.environ)
         except ConfigError as error:
             print(f"error: fix {args.config}: {error}", file=sys.stderr)
+            return 2
+        try:
+            if not args.config_only:
+                validate_required_tools(config, tool_lookup)
+        except InfrastructureError as error:
+            print(f"error: {error}", file=sys.stderr)
             return 2
         print(f"valid: {args.config}")
     elif args.command == "nightly":
@@ -63,6 +76,7 @@ def app(argv: Sequence[str] | None = None) -> int:
             git=GitRepository(root),
             now=lambda: datetime.now(timezone.utc),
             monotonic=time.monotonic,
+            tool_lookup=tool_lookup,
         )
         asyncio.run(
             run_nightly(

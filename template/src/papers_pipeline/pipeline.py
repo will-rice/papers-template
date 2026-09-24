@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import shutil
 
 from papers_pipeline.adapters.base import Adapter
 from papers_pipeline.batching import expected_markdown, infer_backlog, select_batch
@@ -22,6 +23,7 @@ from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.indexing import write_index
 from papers_pipeline.inventory import read_inventory, write_inventory
 from papers_pipeline.models import Paper
+from papers_pipeline.preflight import ToolLookup, validate_required_tools
 from papers_pipeline.normalize import deduplicate, normalize
 from papers_pipeline.state import load_state, save_state
 from papers_pipeline.summary import RunSummary, SourceCounts, write_actions_summary
@@ -47,6 +49,7 @@ class Dependencies:
     now: Callable[[], datetime]
     monotonic: Callable[[], float]
     materializer: InputMaterializer | None = None
+    tool_lookup: ToolLookup | None = None
 
 
 @contextmanager
@@ -81,6 +84,7 @@ async def run_nightly(
     dependencies: Dependencies,
 ) -> RunSummary:
     config = load_config(paths.config, dependencies.environ)
+    validate_required_tools(config, dependencies.tool_lookup or shutil.which)
     initial_state = load_state(paths.state)
     gate = build_topic_gate(config.topic)
     summary = RunSummary()

@@ -200,11 +200,27 @@ def test_checked_in_schema_matches_model() -> None:
 def test_validate_command_accepts_valid_config(
     valid_config: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    exit_code = app(["validate", "--config", str(valid_config)])
+    exit_code = app(
+        ["validate", "--config", str(valid_config)],
+        tool_lookup=lambda name: f"/tools/{name}",
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out == f"valid: {valid_config}\n"
+
+
+def test_validate_command_reports_missing_runtime_tool(
+    valid_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = app(
+        ["validate", "--config", str(valid_config)],
+        tool_lookup=lambda name: None if name == "marker_single" else f"/tools/{name}",
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.err == "error: missing required tools: marker_single\n"
 
 
 def test_validate_command_reports_invalid_config_without_traceback(

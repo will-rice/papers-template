@@ -29,7 +29,7 @@ jobs:
         run: uv sync --locked --extra dev
       - name: Validate configuration
         timeout-minutes: 1
-        run: uv run papers-pipeline validate --config papers.yml
+        run: uv run papers-pipeline validate --config papers.yml --config-only
       - name: Run pre-commit
         timeout-minutes: 5
         run: uv run pre-commit run --all-files

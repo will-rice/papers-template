@@ -8,7 +8,8 @@ Standalone paper discovery and conversion for {{ topic_description }}.
 adapters, normalizes and deduplicates them, applies topic gates, reconciles the
 inventory with the corpus, selects deterministic budgeted batches, converts
 inputs, formats changed files, updates the index, and commits each consistent
-stage. Source cursors share one fetch deadline. Conversion failures are
+stage. Source continuations retain an opaque cursor and its exact UTC fetch
+window across bounded runs under one shared deadline. Conversion failures are
 isolated by paper; infrastructure failures stop the run.
 
 ## Configuration
@@ -44,6 +45,12 @@ LaTeX concurrency is 1-4. PDF concurrency is always exactly 1.
 
 ```bash
 uv sync --locked --extra dev
+uv tool install marker-pdf==1.10.1
+uv pip install --no-deps pypandoc-binary==1.15
+mkdir -p "$HOME/.local/bin"
+ln -sf "$(uv run python -c 'import pypandoc; print(pypandoc.get_pandoc_path())')" \
+  "$HOME/.local/bin/pandoc"
+npm install --global prettier@3.6.2
 uv run papers-pipeline validate --config papers.yml
 uv run papers-pipeline nightly --config papers.yml
 uv run papers-pipeline format-corpus --shard-index 0 --shard-count 8
@@ -60,13 +67,19 @@ uv run pre-commit run --all-files
 ## State, backlog, and recovery
 
 The nightly command derives backlog from `papers.csv` versus files under
-`papers/`. `.papers-state.yml` stores only source cursors and consecutive
-failure attempts. Count and cost budgets select deterministic batches.
+`papers/`. `.papers-state.yml` stores each source's opaque cursor together with
+the exact UTC window start/end and consecutive failure attempts. A capped run
+reuses that window until enumeration completes; only the following run creates
+a fresh lookback window. Legacy cursor-only state is discarded rather than
+being resumed against a different window. Count and cost budgets select
+deterministic batches.
 
 A paper failure does not stop peers. A third consecutive scheduled failure
 creates a colocated `.fixme.txt`; fix the input and remove the marker to retry.
-Missing tools, resource exhaustion, deadlines, and other infrastructure errors
-fail the run explicitly.
+Permanent per-paper download failures (including HTTP 404/410 and invalid input
+URLs) count toward that paper's failure history without cancelling peers.
+Authentication, rate limits, outages, network/timeouts, disk failures, missing
+tools, and resource exhaustion fail the run explicitly.
 
 ## Formatting
 
