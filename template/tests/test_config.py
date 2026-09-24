@@ -40,6 +40,7 @@ conversion:
   max_batches_per_run: 4
   max_papers: 10
   max_cost: 100
+  timeout_seconds: 1800
   html_cost: 2
   latex_cost: 4
   pdf_cost: 20
@@ -87,6 +88,12 @@ def _write_yaml(path: Path, data: dict[str, object]) -> None:
             "total_deadline_seconds",
             30,
             "fetch.total_deadline_seconds must be between 60 and 7200",
+        ),
+        (
+            "conversion",
+            "timeout_seconds",
+            3601,
+            "conversion.timeout_seconds must be between 60 and 3600",
         ),
     ],
 )

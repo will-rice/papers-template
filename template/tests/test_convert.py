@@ -108,13 +108,14 @@ class TrackingRunner(CommandRunner):
         self.behaviors = dict(behaviors or {})
         self.delay = delay
         self.delays = dict(delays or {})
+        self.timeouts: list[float] = []
         self.active = {"html": 0, "latex": 0, "pdf": 0}
         self.maximum_active = {"html": 0, "latex": 0, "pdf": 0}
 
     async def run(
         self, argv: Sequence[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
-        assert timeout == 900
+        self.timeouts.append(timeout)
         kind = _kind_for(argv)
         input_path = Path(argv[1])
         assert input_path.is_absolute()
@@ -663,6 +664,31 @@ async def test_html_and_latex_concurrency_are_bounded_independently(
     )
 
     assert runner.maximum_active == {"html": 2, "latex": 1, "pdf": 0}
+    assert runner.timeouts == [900] * 5
+
+
+@pytest.mark.asyncio
+async def test_convert_batch_uses_configured_timeout(
+    tmp_path: Path, state: PipelineState
+) -> None:
+    target = paper("arxiv:1", input_format="html")
+    fake_materializer = FakeMaterializer(
+        fixtures={target.input_url: fixture_for(target)}
+    )
+    runner = TrackingRunner(materializer=fake_materializer)
+
+    await convert_batch(
+        Batch(papers=(target,), estimated_cost=1),
+        tmp_path,
+        state,
+        CONCURRENCY,
+        runner,
+        fake_materializer,
+        NOW,
+        timeout_seconds=1800,
+    )
+
+    assert runner.timeouts == [1800]
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
 from papers_pipeline.remote import RemoteDownloader
 
-_CONVERSION_TIMEOUT = 900.0
+_DEFAULT_CONVERSION_TIMEOUT = 900.0
 _PROCESS_SHUTDOWN_TIMEOUT = 2.0
 _MARKER_TOOL = "marker_single"
 _PANDOC_TOOL = "pandoc"
@@ -190,7 +190,7 @@ class DownloadingMaterializer:
         target = (
             root / "inputs" / f"{_materialized_name(paper, paper.input_url)}{suffix}"
         )
-        payload = await self._downloader(paper.input_url, _CONVERSION_TIMEOUT)
+        payload = await self._downloader(paper.input_url, _DEFAULT_CONVERSION_TIMEOUT)
         try:
             _atomic_write_bytes(target, payload)
         except OSError as error:
@@ -240,6 +240,7 @@ async def convert_batch(
     runner: CommandRunner,
     materializer: InputMaterializer | None,
     now: datetime,
+    timeout_seconds: float = _DEFAULT_CONVERSION_TIMEOUT,
 ) -> ConversionResult:
     if concurrency.pdf != 1:
         raise InfrastructureError("PDF concurrency must equal 1")
@@ -261,13 +262,13 @@ async def convert_batch(
                 if paper.input_format in {"html", "latex"}:
                     await runner.run(
                         command_for(paper, materialized.local_path, staged_output),
-                        timeout=_CONVERSION_TIMEOUT,
+                        timeout=timeout_seconds,
                     )
                 else:
                     marker_output_dir = _marker_output_dir(workspace, paper)
                     await runner.run(
                         command_for(paper, materialized.local_path, marker_output_dir),
-                        timeout=_CONVERSION_TIMEOUT,
+                        timeout=timeout_seconds,
                     )
                     produced_markdown = _marker_markdown_path(
                         marker_output_dir, materialized.local_path

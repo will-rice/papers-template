@@ -31,6 +31,10 @@ _FIELD_MESSAGES: dict[tuple[str, ...], str] = {
     ("concurrency", "pdf"): "concurrency.pdf must equal 1",
     ("conversion", "max_papers"): "conversion.max_papers must be between 1 and 100",
     (
+        "conversion",
+        "timeout_seconds",
+    ): "conversion.timeout_seconds must be between 60 and 3600",
+    (
         "fetch",
         "total_deadline_seconds",
     ): "fetch.total_deadline_seconds must be between 60 and 7200",
@@ -114,6 +118,7 @@ class ConversionConfig(StrictModel):
     max_batches_per_run: int = Field(ge=1, le=20)
     max_papers: int = Field(ge=1, le=100)
     max_cost: int = Field(ge=1, le=1000)
+    timeout_seconds: int = Field(default=1800, ge=60, le=3600)
     html_cost: int = Field(ge=1, le=100)
     latex_cost: int = Field(ge=1, le=100)
     pdf_cost: int = Field(ge=1, le=1000)

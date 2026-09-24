@@ -144,6 +144,13 @@
           "minimum": 1,
           "title": "Pdf Cost",
           "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 1800,
+          "maximum": 3600,
+          "minimum": 60,
+          "title": "Timeout Seconds",
+          "type": "integer"
         }
       },
       "required": [
