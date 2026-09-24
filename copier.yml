@@ -1,0 +1,23 @@
+_subdirectory: template
+_answers_file: .copier-answers.yml
+_skip_if_exists:
+  - papers
+  - papers.csv
+  - .papers-state.yml
+  - .cache
+  - .pytest_cache
+  - .mypy_cache
+  - .ruff_cache
+project_name:
+  type: str
+  help: Human-readable repository name
+project_slug:
+  type: str
+  help: GitHub repository slug
+  validator: "{% if not (project_slug | regex_search('^[a-z0-9][a-z0-9-]*-papers$')) %}Use a lowercase *-papers slug{% endif %}"
+topic_description:
+  type: str
+  help: One-line topic description
+template_version:
+  type: str
+  default: "0.1.0"
