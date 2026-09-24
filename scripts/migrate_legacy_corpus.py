@@ -42,8 +42,8 @@ SOURCES = {
     "biorxiv": "biorxiv_crossref",
 }
 ARXIV_DOI = re.compile(r"^10\.48550/arxiv\.(?P<arxiv_id>.+)$", re.IGNORECASE)
-# ](../2024/<stem>.md) or ](<stem>.md)
-LEGACY_LINK = re.compile(r"\]\((?:\.\./\d{4}/)?(?P<stem>[^()\s/]+)\.md\)")
+# ](../2024/<stem>.md), ](./<stem>.md) or ](<stem>.md)
+LEGACY_LINK = re.compile(r"\]\((?:\.\./\d{4}/|\./)?(?P<stem>[^()\s/]+)\.md\)")
 
 
 def main() -> None:
