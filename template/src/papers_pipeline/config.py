@@ -118,6 +118,15 @@ class ConversionConfig(StrictModel):
     latex_cost: int = Field(ge=1, le=100)
     pdf_cost: int = Field(ge=1, le=1000)
 
+    @model_validator(mode="after")
+    def costs_fit_budget(self) -> "ConversionConfig":
+        for field in ("html_cost", "latex_cost", "pdf_cost"):
+            if getattr(self, field) > self.max_cost:
+                raise ValueError(
+                    f"conversion.{field} must not exceed conversion.max_cost"
+                )
+        return self
+
 
 class ConcurrencyConfig(StrictModel):
     """Concurrency caps for each conversion type."""
@@ -171,7 +180,10 @@ def _format_validation_error(error: ValidationError) -> str:
     message = str(first_issue["msg"])
     if message.startswith("Value error, "):
         message = message.removeprefix("Value error, ")
-    if message.startswith("topic.plugin") or ".filters" in message:
+    if (
+        message.startswith(("topic.plugin", "conversion."))
+        or ".filters" in message
+    ):
         return message
     return f"{path}: {message}"
 

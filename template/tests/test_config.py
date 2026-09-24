@@ -107,6 +107,28 @@ def test_unsafe_limits_are_rejected(
         load_config(valid_config, {})
 
 
+@pytest.mark.parametrize("cost_field", ["html_cost", "latex_cost", "pdf_cost"])
+def test_conversion_cost_cannot_exceed_batch_budget(
+    valid_config: Path,
+    cost_field: str,
+) -> None:
+    data = _load_yaml(valid_config)
+    conversion = data["conversion"]
+    assert isinstance(conversion, dict)
+    conversion["max_cost"] = 10
+    conversion[cost_field] = 11
+    _write_yaml(valid_config, data)
+
+    with pytest.raises(
+        ConfigError,
+        match=(
+            rf"conversion\.{cost_field} must not exceed "
+            r"conversion\.max_cost"
+        ),
+    ):
+        load_config(valid_config, {})
+
+
 def test_enabled_adapter_requires_declared_secret(valid_config: Path) -> None:
     data = _load_yaml(valid_config)
     adapters = data["adapters"]
