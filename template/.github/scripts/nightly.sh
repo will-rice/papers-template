@@ -29,7 +29,12 @@ if [[ -n "$managed_status" ]]; then
 fi
 
 push_status=0
-git push origin HEAD:main || push_status=$?
+# main can advance (e.g. PR merges) during a long run; replay batches on top.
+{
+  git fetch --quiet origin main &&
+    git rebase --quiet FETCH_HEAD &&
+    git push origin HEAD:main
+} || push_status=$?
 if ((pipeline_status != 0)); then
   exit "$pipeline_status"
 fi
