@@ -65,10 +65,18 @@ class SourceContinuation(FrozenModel):
         return self
 
 
+class BackfillProgress(FrozenModel):
+    """How far back a source's history has been fetched."""
+
+    covered_from: datetime
+    continuation: SourceContinuation | None = None
+
+
 class PipelineState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     continuations: dict[str, SourceContinuation] = Field(default_factory=dict)
+    backfill: dict[str, BackfillProgress] = Field(default_factory=dict)
     failures: dict[str, list[FailureAttempt]] = Field(default_factory=dict)
 
     @model_validator(mode="before")

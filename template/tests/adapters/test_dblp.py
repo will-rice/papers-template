@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from papers_pipeline.adapters.base import FetchWindow
-from papers_pipeline.adapters.dblp import DblpAdapter
+from papers_pipeline.adapters.dblp import DblpAdapter, electronic_format
 from papers_pipeline.config import AdapterConfig
 from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.http import RequestClient
@@ -301,3 +301,18 @@ async def test_dblp_invalid_payload_is_infrastructure_failure(
             client=dblp_invalid_payload_client,
             config=dblp_config,
         )
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://ceur-ws.org/Vol-4038/paper_249.pdf", "pdf"),
+        ("https://example.test/PAPER.PDF?download=1", "pdf"),
+        ("https://doi.org/10.1000/fixture", "html"),
+        ("https://example.test/fixture.html", "html"),
+    ],
+)
+def test_dblp_electronic_editions_that_are_pdfs_convert_as_pdf(
+    url: str, expected: str
+) -> None:
+    assert electronic_format(url) == expected

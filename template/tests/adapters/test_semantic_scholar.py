@@ -1,13 +1,15 @@
 from datetime import datetime, timezone
 from typing import Any, cast
 
+import httpx
 import pytest
+from conftest import FixtureTransport
 
 from papers_pipeline.adapters.base import FetchWindow
 from papers_pipeline.adapters.semantic_scholar import SemanticScholarAdapter
-from papers_pipeline.config import AdapterConfig
+from papers_pipeline.config import AdapterConfig, FetchConfig
 from papers_pipeline.errors import InfrastructureError
-from papers_pipeline.http import RequestClient
+from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.normalize import normalize
 
 from .contract import assert_adapter_contract
@@ -304,3 +306,49 @@ async def test_semantic_scholar_invalid_payload_is_infrastructure_failure(
             client=semantic_scholar_invalid_payload_client,
             config=semantic_scholar_config,
         )
+
+
+@pytest.mark.asyncio
+async def test_semantic_scholar_reports_windows_beyond_reachable_results(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    semantic_scholar_config: AdapterConfig,
+) -> None:
+    route = str(
+        httpx.URL(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={
+                "query": "speech recognition",
+                "publicationDateOrYear": "2024-01-01:2024-01-08",
+                "offset": "0",
+                "limit": "1",
+                "fields": (
+                    "paperId,title,abstract,authors,publicationDate,url,"
+                    "externalIds,openAccessPdf"
+                ),
+            },
+        )
+    )
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(fetch_config.total_deadline_seconds),
+        transport=fixture_transport(
+            {route: {"fixture": "adapters/semantic_scholar/page-over-reachable.json"}}
+        ),
+    )
+
+    async with client:
+        page = await SemanticScholarAdapter(api_key="secret").fetch(
+            window=FetchWindow(
+                start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+            ),
+            cursor=None,
+            client=client,
+            config=semantic_scholar_config,
+        )
+
+    assert page.permanent_errors[-1] == (
+        "semantic_scholar window 2024-01-01..2024-01-08 matches 5000 papers; "
+        "only the first 1000 are reachable, so shorten the window"
+    )

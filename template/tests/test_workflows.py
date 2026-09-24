@@ -98,6 +98,10 @@ def test_nightly_has_non_overlapping_mutation_concurrency() -> None:
         "cancel-in-progress": False,
     }
     assert data["permissions"] == {"contents": "write"}
+    run_step = data["jobs"]["update"]["steps"][-1]
+    assert run_step["env"] == {
+        "SEMANTIC_SCHOLAR_API_KEY": "${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}"
+    }
 
 
 def test_nightly_never_runs_a_complete_corpus_glob() -> None:

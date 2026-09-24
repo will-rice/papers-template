@@ -4,6 +4,27 @@
       "additionalProperties": false,
       "description": "Configuration for one paper source adapter.",
       "properties": {
+        "backfill_days": {
+          "default": 30,
+          "maximum": 365,
+          "minimum": 1,
+          "title": "Backfill Days",
+          "type": "integer"
+        },
+        "backfill_start": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Walk history back to this date, backfill_days per run.",
+          "title": "Backfill Start"
+        },
         "enabled": {
           "default": true,
           "title": "Enabled",
