@@ -8,7 +8,8 @@ from papers_pipeline.adapters.base import FetchWindow
 from papers_pipeline.adapters.huggingface import HuggingFaceAdapter
 from papers_pipeline.config import AdapterConfig
 from papers_pipeline.errors import InfrastructureError
-from papers_pipeline.http import RequestClient
+from papers_pipeline.http import Deadline, RequestClient
+from papers_pipeline.config import FetchConfig
 from papers_pipeline.normalize import normalize
 
 from .contract import assert_adapter_contract
@@ -85,7 +86,7 @@ async def test_huggingface_max_pages_sets_capped_without_dropping_cursor(
     )
 
     assert page.next_cursor
-    assert page.capped is True
+    assert page.capped is False
 
 
 @pytest.mark.asyncio
@@ -227,3 +228,56 @@ async def test_huggingface_invalid_json_page_is_infrastructure_failure(
             client=huggingface_invalid_json_client,
             config=huggingface_config,
         )
+
+
+@pytest.mark.asyncio
+async def test_huggingface_enumerates_each_utc_date_and_resumes_mid_range(
+    fixture_transport: object,
+    fetch_config: FetchConfig,
+    huggingface_config: AdapterConfig,
+) -> None:
+    build_transport = fixture_transport
+    assert callable(build_transport)
+    transport = build_transport(
+        {
+            "https://huggingface.co/api/daily_papers?date=2024-01-08&p=0&limit=2": {
+                "fixture": "adapters/huggingface/empty.json"
+            },
+            "https://huggingface.co/api/daily_papers?date=2024-01-07&p=0&limit=2": {
+                "fixture": "adapters/huggingface/day-7.json"
+            },
+            "https://huggingface.co/api/daily_papers?date=2024-01-07&p=1&limit=2": {
+                "fixture": "adapters/huggingface/empty.json"
+            },
+            "https://huggingface.co/api/daily_papers?date=2024-01-06&p=0&limit=2": {
+                "fixture": "adapters/huggingface/day-6.json"
+            },
+            "https://huggingface.co/api/daily_papers?date=2024-01-06&p=1&limit=2": {
+                "fixture": "adapters/huggingface/empty.json"
+            },
+        }
+    )
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(fetch_config.total_deadline_seconds),
+        transport=transport,
+    )
+    adapter = HuggingFaceAdapter()
+    window = FetchWindow(
+        start=datetime(2024, 1, 6, tzinfo=timezone.utc),
+        end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+    )
+
+    page = await adapter.fetch(window, None, client, huggingface_config)
+    assert page.records == ()
+    page = await adapter.fetch(window, page.next_cursor, client, huggingface_config)
+    assert tuple(record.source_id for record in page.records) == ("2401.00007",)
+    resume_cursor = page.next_cursor
+
+    page = await adapter.fetch(window, resume_cursor, client, huggingface_config)
+    assert page.records == ()
+    page = await adapter.fetch(window, page.next_cursor, client, huggingface_config)
+    assert tuple(record.source_id for record in page.records) == ("2401.00006",)
+    page = await adapter.fetch(window, page.next_cursor, client, huggingface_config)
+    assert page.records == ()
+    assert page.next_cursor is None

@@ -3,13 +3,21 @@ from __future__ import annotations
 import base64
 import json
 import re
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import date, datetime, timedelta
+from typing import TypedDict
 
 from papers_pipeline.adapters.base import FetchPage, FetchWindow, collect_records
 from papers_pipeline.config import AdapterConfig
 from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.http import RequestClient
 from papers_pipeline.models import SourceRecord
+
+
+class _CursorState(TypedDict):
+    date: str | None
+    page: int
+    source_consumed: int
 
 
 class HuggingFaceAdapter:
@@ -25,10 +33,15 @@ class HuggingFaceAdapter:
         config: AdapterConfig,
     ) -> FetchPage:
         state = _decode_cursor(cursor)
+        current_date = (
+            date.fromisoformat(state["date"])
+            if state["date"] is not None
+            else window.end.date()
+        )
         text = await client.get_text(
             "https://huggingface.co/api/daily_papers",
             {
-                "date": window.end.date().isoformat(),
+                "date": current_date.isoformat(),
                 "p": str(state["page"]),
                 "limit": str(config.page_size),
             },
@@ -52,22 +65,32 @@ class HuggingFaceAdapter:
             if window.start <= record.published <= window.end
         )
         if not payload:
+            previous_date = current_date - timedelta(days=1)
+            next_cursor = (
+                _encode_cursor(
+                    {
+                        "date": previous_date.isoformat(),
+                        "page": 0,
+                        "source_consumed": state["source_consumed"],
+                    }
+                )
+                if previous_date >= window.start.date()
+                else None
+            )
             return FetchPage(
                 records=records,
-                next_cursor=None,
+                next_cursor=next_cursor,
                 capped=False,
                 permanent_errors=errors,
             )
 
-        next_state = {
-            "consumed": state["consumed"] + len(payload),
+        next_state: _CursorState = {
+            "date": current_date.isoformat(),
             "page": state["page"] + 1,
+            "source_consumed": state["source_consumed"] + len(payload),
         }
         next_cursor = _encode_cursor(next_state)
-        capped = (
-            next_state["page"] >= config.max_pages
-            or next_state["consumed"] >= config.max_results
-        )
+        capped = len(payload) >= config.max_results
         return FetchPage(
             records=records,
             next_cursor=next_cursor,
@@ -103,14 +126,14 @@ class HuggingFaceAdapter:
         )
 
 
-def _encode_cursor(state: dict[str, int]) -> str:
+def _encode_cursor(state: Mapping[str, object]) -> str:
     payload = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: str | None) -> dict[str, int]:
+def _decode_cursor(cursor: str | None) -> _CursorState:
     if cursor is None:
-        return {"consumed": 0, "page": 0}
+        return {"date": None, "page": 0, "source_consumed": 0}
     padding = "=" * (-len(cursor) % 4)
     try:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
@@ -121,8 +144,9 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
         ) from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
-    consumed = data.get("consumed", data.get("emitted"))
+    consumed = data.get("source_consumed", data.get("consumed", data.get("emitted")))
     page = data.get("page")
+    raw_date = data.get("date")
     if (
         not isinstance(consumed, int)
         or consumed < 0
@@ -130,7 +154,18 @@ def _decode_cursor(cursor: str | None) -> dict[str, int]:
         or page < 0
     ):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
-    return {"consumed": consumed, "page": page}
+    if raw_date is not None:
+        if not isinstance(raw_date, str):
+            raise InfrastructureError(
+                f"invalid huggingface continuation cursor: {cursor}"
+            )
+        try:
+            date.fromisoformat(raw_date)
+        except ValueError as error:
+            raise InfrastructureError(
+                f"invalid huggingface continuation cursor: {cursor}"
+            ) from error
+    return {"date": raw_date, "page": page, "source_consumed": consumed}
 
 
 def _required_identifier(paper: dict[str, object]) -> str:
