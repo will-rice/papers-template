@@ -300,8 +300,6 @@ def _managed_paths(paths: PipelinePaths) -> list[Path]:
         paths.state,
         paths.root / "README.md",
         paths.root / "papers",
-        paths.root / ".convert-batch",
-        paths.root / "inputs",
     ]
 
 

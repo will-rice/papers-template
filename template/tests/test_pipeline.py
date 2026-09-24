@@ -14,7 +14,6 @@ from papers_pipeline.adapters.base import FetchPage, FetchWindow
 from papers_pipeline.convert import (
     CommandRunner,
     InputMaterializer,
-    MaterializedInput,
 )
 from papers_pipeline.errors import ConfigError, InfrastructureError, PaperError
 from papers_pipeline.git import GitRepository
@@ -84,11 +83,11 @@ class FakeClient:
 
 
 class FakeMaterializer(InputMaterializer):
-    async def materialize(self, paper: Any, root: Path) -> MaterializedInput:
+    async def materialize(self, paper: Any, root: Path) -> Path:
         path = root / "inputs" / f"{paper.identifier}.html"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("<p>paper</p>", encoding="utf-8")
-        return MaterializedInput(path)
+        return path
 
 
 class FakeRunner(CommandRunner):

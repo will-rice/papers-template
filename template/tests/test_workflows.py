@@ -10,8 +10,6 @@ from typing import Any
 import pytest
 import yaml
 
-from papers_pipeline.pipeline import PipelinePaths, _managed_paths
-
 
 class WorkflowLoader(yaml.SafeLoader):
     """Load workflow YAML without treating the key `on` as a boolean."""
@@ -31,13 +29,12 @@ for first_character in "OoYyNn":
 WORKFLOWS = Path(".github/workflows")
 SCRIPTS = Path(".github/scripts")
 PINNED_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
-MANAGED_PATHS = (
+DIRTY_PATHS = (
     "papers",
     "papers.csv",
     ".papers-state.yml",
     "README.md",
-    ".convert-batch",
-    "inputs",
+    "src/unrelated.py",
 )
 
 
@@ -206,7 +203,7 @@ def _nightly_scenario(tmp_path: Path, *, dirty_path: str | None) -> tuple[int, i
     if dirty_path is not None:
         target = (
             f"{dirty_path}/leftover"
-            if dirty_path in {"papers", ".convert-batch", "inputs", ".cache"}
+            if dirty_path in {"papers", ".cache"}
             else dirty_path
         )
         (work / target).parent.mkdir(parents=True, exist_ok=True)
@@ -249,8 +246,8 @@ def _nightly_scenario(tmp_path: Path, *, dirty_path: str | None) -> tuple[int, i
     return completed.returncode, remote_count
 
 
-@pytest.mark.parametrize("dirty_path", MANAGED_PATHS)
-def test_nightly_rejects_dirty_pipeline_paths_after_failure(
+@pytest.mark.parametrize("dirty_path", DIRTY_PATHS)
+def test_nightly_rejects_any_dirty_path_after_failure(
     tmp_path: Path,
     dirty_path: str,
 ) -> None:
@@ -267,29 +264,6 @@ def test_nightly_pushes_consistent_commits_with_clean_or_ignored_cache(
     status, remote_count = _nightly_scenario(tmp_path, dirty_path=dirty_path)
     assert status != 0
     assert remote_count == 2
-
-
-def test_nightly_guard_matches_pipeline_managed_paths(tmp_path: Path) -> None:
-    paths = PipelinePaths(
-        root=tmp_path,
-        config=tmp_path / "papers.yml",
-        state=tmp_path / ".papers-state.yml",
-        inventory=tmp_path / "papers.csv",
-        summary=None,
-    )
-    assert tuple(
-        path.relative_to(tmp_path).as_posix() for path in _managed_paths(paths)
-    ) == (
-        "papers.csv",
-        ".papers-state.yml",
-        "README.md",
-        "papers",
-        ".convert-batch",
-        "inputs",
-    )
-    script = (SCRIPTS / "nightly.sh").read_text(encoding="utf-8")
-    for path in MANAGED_PATHS:
-        assert f'"{path}"' in script
 
 
 def test_nightly_script_is_executable() -> None:
