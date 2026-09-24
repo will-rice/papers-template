@@ -97,7 +97,7 @@ def test_copier_update_preserves_repository_owned_data(tmp_path: Path) -> None:
         b"input_url,categories,doi,arxiv_id\n"
     )
     assert (destination / ".papers-state.yml").read_bytes() == (
-        b"cursors: {}\nfailures: {}\n"
+        b"continuations: {}\nfailures: {}\n"
     )
 
     _git(destination, "init", "--quiet")

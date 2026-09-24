@@ -19,7 +19,7 @@ from papers_pipeline.config import (
 )
 from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.http import Deadline, RequestClient
-from papers_pipeline.models import PipelineState, SourceRecord
+from papers_pipeline.models import PipelineState, SourceContinuation, SourceRecord
 from papers_pipeline.fetch import fetch_all
 
 NOW = datetime(2026, 9, 23, 18, 29, 6, tzinfo=timezone.utc)
@@ -172,7 +172,15 @@ async def test_fetch_uses_source_windows_continues_after_zero_output_and_clears_
     None
 ):
     config = pipeline_config(adapter_config("arxiv", lookback_days=7))
-    state = PipelineState(cursors={"arxiv": "opaque-start"})
+    state = PipelineState(
+        continuations={
+            "arxiv": SourceContinuation(
+                cursor="opaque-start",
+                window_start=NOW - timedelta(days=7),
+                window_end=NOW,
+            )
+        }
+    )
     adapter = RecordingAdapter(
         "arxiv",
         pages=[
@@ -212,7 +220,7 @@ async def test_fetch_uses_source_windows_continues_after_zero_output_and_clears_
         "2401.00001",
         "2401.00002",
     )
-    assert result.state.cursors == {}
+    assert result.state.continuations == {}
     assert result.stats[0].source == "arxiv"
     assert result.stats[0].fetched == 2
     assert result.stats[0].rejected == 1
@@ -244,7 +252,13 @@ async def test_fetch_persists_cursor_and_marks_result_cap_without_completing() -
     result = await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
 
     assert clients[0].closed is True
-    assert result.state.cursors == {"arxiv": "opaque-next"}
+    assert result.state.continuations == {
+        "arxiv": SourceContinuation(
+            cursor="opaque-next",
+            window_start=NOW - timedelta(days=7),
+            window_end=NOW,
+        )
+    }
     assert result.stats[0].fetched == 1
     assert result.stats[0].rejected == 0
     assert result.stats[0].capped is True
@@ -336,7 +350,7 @@ async def test_fetch_passes_remaining_budget_to_adapter_and_preserves_page_two_c
         "2401.00003",
     )
     assert len({record.source_id for record in result.records}) == 3
-    assert result.state.cursors == {"arxiv": "opaque-tail"}
+    assert result.state.continuations["arxiv"].cursor == "opaque-tail"
     assert result.stats[0].fetched == 3
     assert result.stats[0].capped is True
     assert result.stats[0].complete is False
@@ -388,7 +402,7 @@ async def test_fetch_enforces_page_cap_and_uses_configured_adapter_order_under_o
     assert arxiv.windows == [FetchWindow(start=NOW - timedelta(days=7), end=NOW)]
     assert tuple(record.source for record in result.records) == ("dblp", "arxiv")
     assert tuple(stat.source for stat in result.stats) == ("dblp", "arxiv")
-    assert result.state.cursors == {"dblp": "dblp-cursor"}
+    assert result.state.continuations["dblp"].cursor == "dblp-cursor"
     assert result.stats[0].capped is True
     assert result.stats[0].complete is False
     assert result.stats[1].capped is False
@@ -438,3 +452,45 @@ async def test_infrastructure_failure_aborts_fetching_and_closes_current_client(
     assert len(clients) == 1
     assert clients[0].closed is True
     assert skipped.windows == []
+
+
+@pytest.mark.asyncio
+async def test_later_run_reuses_persisted_window_until_source_completes() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7, max_pages=1))
+    first_adapter = RecordingAdapter(
+        "arxiv",
+        pages=[
+            FetchPage(
+                records=(source_record("arxiv", "first"),),
+                next_cursor="resume",
+                capped=False,
+                permanent_errors=(),
+            )
+        ],
+    )
+    factory, _, _ = client_factory(config.fetch)
+    first = await fetch_all(
+        config, PipelineState(), {"arxiv": first_adapter}, factory, NOW
+    )
+
+    later = NOW + timedelta(days=2)
+    second_adapter = RecordingAdapter(
+        "arxiv",
+        pages=[
+            FetchPage(
+                records=(source_record("arxiv", "second"),),
+                next_cursor=None,
+                capped=False,
+                permanent_errors=(),
+            )
+        ],
+    )
+    resumed = await fetch_all(
+        config, first.state, {"arxiv": second_adapter}, factory, later
+    )
+
+    assert second_adapter.windows == [
+        FetchWindow(start=NOW - timedelta(days=7), end=NOW)
+    ]
+    assert second_adapter.cursors == ["resume"]
+    assert resumed.state.continuations == {}

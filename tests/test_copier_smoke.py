@@ -90,7 +90,7 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
         [
             sys.executable,
             "-c",
-            "from papers_pipeline.cli import app; raise SystemExit(app(['validate', '--config', 'papers.yml']))",
+            "from papers_pipeline.cli import app; raise SystemExit(app(['validate', '--config', 'papers.yml', '--config-only']))",
         ],
         cwd=destination,
         env=env,
@@ -176,7 +176,7 @@ def test_template_renders_protected_state_files(tmp_path: Path) -> None:
     assert papers_csv.read_text() == (
         "identifier,title,abstract,authors,published,url,source,input_format,input_url,categories,doi,arxiv_id\n"
     )
-    assert state_file.read_text() == "cursors: {}\nfailures: {}\n"
+    assert state_file.read_text() == "continuations: {}\nfailures: {}\n"
 
 
 def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:

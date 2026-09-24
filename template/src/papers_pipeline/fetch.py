@@ -10,7 +10,7 @@ from papers_pipeline.adapters.base import Adapter, FetchPage
 from papers_pipeline.config import AdapterConfig, PipelineConfig
 from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.http import Deadline, RequestClient
-from papers_pipeline.models import PipelineState, SourceRecord
+from papers_pipeline.models import PipelineState, SourceContinuation, SourceRecord
 
 
 @dataclass(frozen=True)
@@ -64,18 +64,23 @@ async def fetch_all(
     records: list[SourceRecord] = []
     stats: list[FetchStats] = []
     events: list[str] = []
-    cursors = dict(state.cursors)
+    continuations = dict(state.continuations)
 
     for adapter_index, adapter_config in enumerate(config.adapters):
         if not adapter_config.enabled:
             continue
 
         adapter = adapters[adapter_config.name]
+        continuation = continuations.get(adapter.name)
         window = adapter.window_type(
-            start=now - timedelta(days=adapter_config.lookback_days),
-            end=now,
+            start=(
+                continuation.window_start
+                if continuation
+                else now - timedelta(days=adapter_config.lookback_days)
+            ),
+            end=continuation.window_end if continuation else now,
         )
-        cursor = cursors.get(adapter.name)
+        cursor = continuation.cursor if continuation else None
         starting_cursor = cursor
         source_records: list[SourceRecord] = []
         source_errors = 0
@@ -126,17 +131,21 @@ async def fetch_all(
         events.extend(source_error_events)
 
         if cursor is not None:
-            cursors[adapter.name] = cursor
+            continuations[adapter.name] = SourceContinuation(
+                cursor=cursor,
+                window_start=window.start,
+                window_end=window.end,
+            )
             if capped:
                 events.append(f"{adapter.name}: cap reached; continuation persisted")
         elif complete:
-            cursors.pop(adapter.name, None)
+            continuations.pop(adapter.name, None)
             if starting_cursor is not None:
                 events.append(f"{adapter.name}: fetch complete; cursor cleared")
             else:
                 events.append(f"{adapter.name}: fetch complete")
         elif capped:
-            cursors.pop(adapter.name, None)
+            continuations.pop(adapter.name, None)
             events.append(f"{adapter.name}: cap reached")
 
         records.extend(source_records)
@@ -152,7 +161,7 @@ async def fetch_all(
 
     return FetchResult(
         records=tuple(records),
-        state=state.model_copy(update={"cursors": cursors}),
+        state=state.model_copy(update={"continuations": continuations}),
         stats=tuple(stats),
         events=tuple(events),
     )
