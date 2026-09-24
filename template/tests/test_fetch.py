@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import httpx
 import pytest
@@ -18,7 +18,12 @@ from papers_pipeline.config import (
 )
 from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.http import Deadline, RequestClient
-from papers_pipeline.models import PipelineState, SourceContinuation, SourceRecord
+from papers_pipeline.models import (
+    BackfillProgress,
+    PipelineState,
+    SourceContinuation,
+    SourceRecord,
+)
 from papers_pipeline.fetch import fetch_all
 
 NOW = datetime(2026, 9, 23, 18, 29, 6, tzinfo=timezone.utc)
@@ -492,3 +497,109 @@ async def test_later_run_reuses_persisted_window_until_source_completes() -> Non
     ]
     assert second_adapter.cursors == ["resume"]
     assert resumed.state.continuations == {}
+
+
+def page(*records: SourceRecord, next_cursor: str | None = None) -> FetchPage:
+    return FetchPage(
+        records=records, next_cursor=next_cursor, capped=False, permanent_errors=()
+    )
+
+
+def backfill_config(start: date, *, backfill_days: int = 30) -> PipelineConfig:
+    return pipeline_config(
+        adapter_config("arxiv", lookback_days=7).model_copy(
+            update={"backfill_start": start, "backfill_days": backfill_days}
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_backfill_steps_back_one_chunk_behind_the_lookback_window() -> None:
+    config = backfill_config(date(2020, 1, 1))
+    old = source_record("arxiv", "old", published=NOW - timedelta(days=20))
+    adapter = RecordingAdapter("arxiv", pages=[page(), page(old)])
+    factory, _, _ = client_factory(config.fetch)
+
+    result = await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
+
+    lookback_start = NOW - timedelta(days=7)
+    assert adapter.windows == [
+        FetchWindow(start=lookback_start, end=NOW),
+        FetchWindow(start=lookback_start - timedelta(days=30), end=lookback_start),
+    ]
+    assert result.records == (old,)
+    assert result.stats[0].fetched == 1
+    assert result.state.backfill == {
+        "arxiv": BackfillProgress(covered_from=lookback_start - timedelta(days=30))
+    }
+    assert result.events[-1] == (
+        f"arxiv: backfilled to {(lookback_start - timedelta(days=30)).date()}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_capped_backfill_window_resumes_before_stepping_further_back() -> None:
+    config = backfill_config(date(2020, 1, 1))
+    covered_from = NOW - timedelta(days=100)
+    history_window = FetchWindow(
+        start=covered_from - timedelta(days=30), end=covered_from
+    )
+    state = PipelineState(
+        backfill={
+            "arxiv": BackfillProgress(
+                covered_from=covered_from,
+                continuation=SourceContinuation(
+                    cursor="history-2",
+                    window_start=history_window.start,
+                    window_end=history_window.end,
+                ),
+            )
+        }
+    )
+    adapter = RecordingAdapter(
+        "arxiv", pages=[page(), page(next_cursor="history-3"), page(), page()]
+    )
+    factory, _, _ = client_factory(config.fetch)
+    capped = config.model_copy(
+        update={"adapters": [config.adapters[0].model_copy(update={"max_pages": 1})]}
+    )
+
+    first = await fetch_all(capped, state, {"arxiv": adapter}, factory, NOW)
+    second = await fetch_all(config, first.state, {"arxiv": adapter}, factory, NOW)
+
+    # Each run fetches its lookback window, then resumes the capped history window.
+    assert adapter.windows[1::2] == [history_window, history_window]
+    assert adapter.cursors[1::2] == ["history-2", "history-3"]
+    assert first.state.backfill["arxiv"].covered_from == covered_from
+    assert second.state.backfill == {
+        "arxiv": BackfillProgress(covered_from=history_window.start)
+    }
+
+
+@pytest.mark.asyncio
+async def test_backfill_stops_at_its_start_date() -> None:
+    start = (NOW - timedelta(days=20)).date()
+    config = backfill_config(start)
+    adapter = RecordingAdapter("arxiv", pages=[page(), page(), page()])
+    factory, _, _ = client_factory(config.fetch)
+
+    first = await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
+    second = await fetch_all(config, first.state, {"arxiv": adapter}, factory, NOW)
+
+    limit = datetime.combine(start, time.min, tzinfo=timezone.utc)
+    assert adapter.windows[1] == FetchWindow(start=limit, end=NOW - timedelta(days=7))
+    assert len(adapter.windows) == 3  # second run fetches only the lookback window
+    assert second.state.backfill == {"arxiv": BackfillProgress(covered_from=limit)}
+
+
+@pytest.mark.parametrize("name", ["dblp", "papers_with_code"])
+def test_backfill_requires_a_source_that_queries_date_ranges(
+    name: AdapterName,
+) -> None:
+    with pytest.raises(ValueError, match=f"{name} cannot backfill"):
+        adapter_config(name, lookback_days=7).model_validate(
+            {
+                **adapter_config(name, lookback_days=7).model_dump(),
+                "backfill_start": date(2020, 1, 1),
+            }
+        )

@@ -1,6 +1,7 @@
 """Configuration schema and preflight validation for the papers pipeline."""
 
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -57,6 +58,12 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# Adapters whose source APIs filter by date range, so a past window is cheap.
+_BACKFILL_ADAPTERS = frozenset(
+    {"arxiv", "biorxiv_crossref", "huggingface", "semantic_scholar"}
+)
+
+
 class AdapterConfig(StrictModel):
     """Configuration for one paper source adapter."""
 
@@ -68,6 +75,11 @@ class AdapterConfig(StrictModel):
     max_pages: int = Field(ge=1, le=100)
     max_results: int = Field(ge=1, le=10000)
     filters: dict[str, str] = Field(default_factory=dict)
+    backfill_start: date | None = Field(
+        default=None,
+        description="Walk history back to this date, backfill_days per run.",
+    )
+    backfill_days: int = Field(default=30, ge=1, le=365)
 
     @model_validator(mode="after")
     def validate_filters(self) -> "AdapterConfig":
@@ -81,6 +93,10 @@ class AdapterConfig(StrictModel):
                 raise ValueError(
                     "biorxiv_crossref.filters.provider must be biorxiv or crossref"
                 )
+        if self.backfill_start is not None and self.name not in _BACKFILL_ADAPTERS:
+            raise ValueError(
+                f"{self.name} cannot backfill: it does not query past date ranges"
+            )
         return self
 
 
