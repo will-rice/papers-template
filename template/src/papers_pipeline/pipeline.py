@@ -182,6 +182,7 @@ async def run_nightly(
                         dependencies.runner,
                         dependencies.materializer,
                         dependencies.now(),
+                        timeout_seconds=config.conversion.timeout_seconds,
                     )
                 state = converted.state
                 summary.succeeded += len(converted.succeeded)

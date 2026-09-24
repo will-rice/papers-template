@@ -136,6 +136,7 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
             "max_batches_per_run": 4,
             "max_papers": 10,
             "max_cost": 100,
+            "timeout_seconds": 1800,
             "html_cost": 2,
             "latex_cost": 4,
             "pdf_cost": 20,
