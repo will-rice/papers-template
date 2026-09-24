@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "copier>=9.10,<10",
+  "hatchling>=1.27,<2",
   "pre-commit>=4.3,<5",
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
