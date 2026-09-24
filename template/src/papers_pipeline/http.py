@@ -1,11 +1,10 @@
 """Deadline-aware HTTP client with bounded retry behavior."""
 
-from __future__ import annotations
-
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import Self
 
 import httpx
 
@@ -24,9 +23,7 @@ class Deadline:
     clock: Callable[[], float]
 
     @classmethod
-    def start(
-        cls, seconds: float, clock: Callable[[], float] = time.monotonic
-    ) -> Deadline:
+    def start(cls, seconds: float, clock: Callable[[], float] = time.monotonic) -> Self:
         return cls(clock() + seconds, clock)
 
     def remaining(self) -> float:
@@ -52,7 +49,7 @@ class RequestClient:
         self._sleep = sleep
         self.events: list[str] = []
 
-    async def __aenter__(self) -> RequestClient:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(

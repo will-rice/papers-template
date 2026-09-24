@@ -1,7 +1,5 @@
 """Configuration schema and preflight validation for the papers pipeline."""
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 from typing import Any, Literal, Mapping
