@@ -148,14 +148,21 @@ def test_feature_branch_dispatch_cannot_contaminate_formatting_pr() -> None:
         assert checkout["with"]["ref"] == "${{ needs.plan.outputs.base_sha }}"
 
 
-def test_format_corpus_validates_and_builds_deterministic_shards() -> None:
+def test_format_corpus_limits_and_builds_deterministic_shards() -> None:
     data = workflow("format-corpus.yml")
     plan = data["jobs"]["plan"]
     matrix_script = next(
         step["run"] for step in plan["steps"] if step.get("id") == "matrix"
     )
-    assert "1 <= count <= 32" in matrix_script
-    assert "for index in range(count)" in matrix_script
+    assert data["on"]["workflow_dispatch"]["inputs"]["shard_count"]["options"] == [
+        "1",
+        "2",
+        "4",
+        "8",
+        "16",
+        "32",
+    ]
+    assert "range($count)" in matrix_script
     assert data["jobs"]["format"]["strategy"]["fail-fast"] is False
 
 
