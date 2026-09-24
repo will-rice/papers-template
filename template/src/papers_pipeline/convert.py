@@ -149,9 +149,9 @@ class DownloadingMaterializer:
                 )
             return MaterializedInput(local_path=local_path)
         if parts.scheme not in {"http", "https"}:
-            raise InfrastructureError(
-                f"unsupported conversion input URL: {paper.input_url}"
-            )
+            raise PaperError(f"unsupported conversion input URL: {paper.input_url}")
+        if not parts.hostname:
+            raise PaperError(f"invalid conversion input URL: {paper.input_url}")
 
         suffix = Path(parts.path).suffix or _default_suffix(paper)
         target = (
@@ -343,6 +343,8 @@ async def _download_bytes(url: str, timeout: float) -> bytes:
         raise InfrastructureError(
             f"conversion input redirect HTTP {response.status_code}: {url}"
         )
+    if 400 <= response.status_code < 500 and response.status_code != 429:
+        raise PaperError(f"conversion input HTTP {response.status_code}: {url}")
     if response.is_error:
         raise InfrastructureError(
             f"conversion input HTTP {response.status_code}: {url}"

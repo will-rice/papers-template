@@ -18,6 +18,7 @@ from papers_pipeline.convert import (
     DownloadingMaterializer,
     MaterializedInput,
     convert_batch,
+    _download_bytes,
 )
 from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
@@ -72,6 +73,8 @@ class FakeMaterializer:
             raise InfrastructureError(
                 f"conversion input cache write failed: {paper.input_url}"
             )
+        if behavior == "paper_error":
+            raise PaperError(f"conversion input HTTP 404: {paper.input_url}")
 
         source = self.fixtures[paper.input_url]
         local_path = (
@@ -288,6 +291,102 @@ async def test_downloading_materializer_maps_disk_errors_to_infrastructure_error
         await DownloadingMaterializer(downloader=downloader).materialize(
             target, tmp_path
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 404, 410, 422])
+async def test_permanent_download_http_errors_are_paper_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    class Client:
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, url: str, timeout: float) -> object:
+            return type(
+                "Response",
+                (),
+                {
+                    "status_code": status_code,
+                    "is_error": True,
+                    "content": b"",
+                },
+            )()
+
+    monkeypatch.setattr(
+        "papers_pipeline.convert.httpx.AsyncClient", lambda **_: Client()
+    )
+
+    with pytest.raises(PaperError, match=f"HTTP {status_code}"):
+        await _download_bytes("https://example.test/missing.pdf", 1)
+
+
+@pytest.mark.asyncio
+async def test_invalid_per_paper_input_url_is_a_paper_error(tmp_path: Path) -> None:
+    target = paper("arxiv:invalid", input_format="pdf").model_copy(
+        update={"input_url": "ftp://example.test/paper.pdf"}
+    )
+
+    with pytest.raises(PaperError, match="unsupported conversion input URL"):
+        await DownloadingMaterializer().materialize(target, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_permanent_download_failure_does_not_cancel_batch_peer(
+    tmp_path: Path,
+) -> None:
+    missing = paper("arxiv:missing", input_format="html")
+    valid = paper("arxiv:valid", input_format="html")
+    batch = Batch(papers=(missing, valid), estimated_cost=2)
+    fake_materializer = FakeMaterializer(
+        fixtures={valid.input_url: fixture_for(valid)},
+        behaviors={missing.input_url: "paper_error"},
+    )
+
+    result = await convert_batch(
+        batch,
+        tmp_path,
+        PipelineState(),
+        CONCURRENCY,
+        TrackingRunner(materializer=fake_materializer),
+        fake_materializer,
+        NOW,
+    )
+
+    assert [item.paper.identifier for item in result.failed] == [missing.identifier]
+    assert [item.paper.identifier for item in result.succeeded] == [valid.identifier]
+    assert missing.identifier in result.state.failures
+
+
+@pytest.mark.asyncio
+async def test_third_permanent_download_failure_writes_fixme(tmp_path: Path) -> None:
+    target = paper("arxiv:missing", input_format="html")
+    attempts = [
+        FailureAttempt(occurred_at=NOW.replace(day=21), error="HTTP 404"),
+        FailureAttempt(occurred_at=NOW.replace(day=22), error="HTTP 404"),
+    ]
+    fake_materializer = FakeMaterializer(
+        fixtures={},
+        behaviors={target.input_url: "paper_error"},
+    )
+
+    result = await convert_batch(
+        Batch(papers=(target,), estimated_cost=1),
+        tmp_path,
+        PipelineState(failures={target.identifier: attempts}),
+        CONCURRENCY,
+        TrackingRunner(materializer=fake_materializer),
+        fake_materializer,
+        NOW,
+    )
+
+    marker = expected_markdown(tmp_path, target).with_suffix(".fixme.txt")
+    assert marker in result.promoted
+    assert target.identifier not in result.state.failures
 
 
 @pytest.mark.asyncio
