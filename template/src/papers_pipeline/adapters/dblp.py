@@ -77,9 +77,7 @@ class DblpAdapter:
         )
         title = _required_text(info.get("title"), field="title", identifier=identifier)
         published = _required_year(info.get("year"), identifier=identifier)
-        input_url = _electronic_url(
-            info.get("ee"), info.get("url"), identifier=identifier
-        )
+        input_url = _electronic_url(info.get("ee"), identifier=identifier)
         return SourceRecord(
             source=self.name,
             source_id=identifier,
@@ -178,8 +176,9 @@ def _required_year(value: object, *, identifier: str) -> datetime:
         raise PaperError(f"dblp record invalid year: {identifier}") from error
 
 
-def _electronic_url(ee: object, url: object, *, identifier: str) -> str:
-    electronic_url = _first_text(ee) or _first_text(url)
+def _electronic_url(ee: object, *, identifier: str) -> str:
+    # Only "ee" links to the paper; "url" is dblp's own metadata page.
+    electronic_url = _first_text(ee)
     if not electronic_url:
         raise PaperError(f"dblp record missing electronic URL: {identifier}")
     return electronic_url
