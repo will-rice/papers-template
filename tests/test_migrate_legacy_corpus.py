@@ -36,7 +36,8 @@ def legacy_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (papers / "README.md").write_text("# Index\n", encoding="utf-8")
     (papers / "2024" / "README.md").write_text("# 2024\n", encoding="utf-8")
     (papers / "2024" / "2401.00001.md").write_text(
-        "Cites [scholar](../2023/s2:abc123.md) and [pending](2401.00002.md).\n",
+        "Cites [scholar](../2023/s2:abc123.md), [pending](2401.00002.md)"
+        " and [same year](./2401.00002.md).\n",
         encoding="utf-8",
     )
     (papers / "2024" / "dblp:journals_corr_abs-2401-00001.md").write_text(
@@ -78,7 +79,10 @@ def test_migration_produces_generated_template_corpus(legacy_repo: Path) -> None
     text = expected_markdown(legacy_repo, converted).read_text(encoding="utf-8")
     scholar = expected_markdown(legacy_repo, by_identifier["semantic_scholar:abc123"])
     pending = expected_markdown(legacy_repo, by_identifier["arxiv:2401.00002"])
-    assert text == (f"Cites [scholar]({scholar.name}) and [pending]({pending.name}).\n")
+    assert text == (
+        f"Cites [scholar]({scholar.name}), [pending]({pending.name})"
+        f" and [same year]({pending.name}).\n"
+    )
     assert load_state(legacy_repo / ".papers-state.yml").continuations == {}
     # Moves are staged as renames so history follows each paper.
     assert "R100\tpapers/2023/s2:abc123.md" in git(
