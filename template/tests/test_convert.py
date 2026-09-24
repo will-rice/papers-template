@@ -282,11 +282,7 @@ async def test_command_runner_fails_safe_for_infrastructure_and_unknown_errors(
     stream: str,
 ) -> None:
     destination = "" if stream == "stdout" else ", file=sys.stderr"
-    script = (
-        "import sys; "
-        f"print({message!r}{destination}); "
-        "raise SystemExit(1)"
-    )
+    script = f"import sys; print({message!r}{destination}); raise SystemExit(1)"
 
     with pytest.raises(InfrastructureError, match="conversion infrastructure failure"):
         await CommandRunner().run([sys.executable, "-c", script], timeout=5)

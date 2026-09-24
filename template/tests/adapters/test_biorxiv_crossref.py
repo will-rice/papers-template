@@ -96,7 +96,11 @@ async def test_biorxiv_local_truncation_resumes_raw_page_without_duplicates(
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        body = fixture.read_text() if request.url.path.endswith("/0") else '{"collection":[]}'
+        body = (
+            fixture.read_text()
+            if request.url.path.endswith("/0")
+            else '{"collection":[]}'
+        )
         return httpx.Response(200, text=body)
 
     client = RequestClient(

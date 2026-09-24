@@ -124,9 +124,7 @@ class BiorxivCrossrefAdapter:
                     "token": next_token,
                 }
             )
-            capped = (
-                page >= config.max_pages or len(raw_records) >= config.max_results
-            )
+            capped = page >= config.max_pages or len(raw_records) >= config.max_results
         return FetchPage(
             records=page_records,
             next_cursor=next_cursor,

@@ -180,10 +180,7 @@ def _format_validation_error(error: ValidationError) -> str:
     message = str(first_issue["msg"])
     if message.startswith("Value error, "):
         message = message.removeprefix("Value error, ")
-    if (
-        message.startswith(("topic.plugin", "conversion."))
-        or ".filters" in message
-    ):
+    if message.startswith(("topic.plugin", "conversion.")) or ".filters" in message:
         return message
     return f"{path}: {message}"
 

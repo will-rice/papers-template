@@ -250,9 +250,7 @@ async def test_arxiv_remote_query_is_bound_to_window_and_stable_across_resume(
     first = await adapter.fetch(window, None, client, arxiv_config)
     second = await adapter.fetch(window, first.next_cursor, client, arxiv_config)
 
-    expected_query = (
-        "(cat:cs.CL) AND submittedDate:[202401010000 TO 202401080000]"
-    )
+    expected_query = "(cat:cs.CL) AND submittedDate:[202401010000 TO 202401080000]"
     assert [request.url.params["search_query"] for request in requests] == [
         expected_query,
         expected_query,
