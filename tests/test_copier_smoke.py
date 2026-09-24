@@ -213,3 +213,43 @@ def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:
         env=environment,
         check=True,
     )
+
+
+def test_generated_readme_documents_operations_and_migration_gate(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "template-source"
+    source_ref = _clean_template_source(source)
+    destination = tmp_path / "sample-papers"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DirtyLocalWarning)
+        run_copy(
+            str(source),
+            destination,
+            data={
+                "project_name": "Sample Papers",
+                "project_slug": "sample-papers",
+                "topic_description": "sample topic",
+                "template_version": "0.1.0",
+            },
+            vcs_ref=source_ref,
+            defaults=True,
+            unsafe=True,
+        )
+
+    readme = (destination / "README.md").read_text(encoding="utf-8")
+    for heading in (
+        "# Sample Papers",
+        "## Architecture",
+        "## Configuration",
+        "## Run locally",
+        "## State, backlog, and recovery",
+        "## Formatting",
+        "## Automation and summaries",
+        "## Updating from the template",
+        "## Ownership boundary",
+        "## Migration gate",
+    ):
+        assert heading in readme
+    assert "PDF concurrency is always exactly 1" in readme
+    assert "Do not begin a migration" in readme

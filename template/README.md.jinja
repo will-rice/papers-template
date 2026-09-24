@@ -1,0 +1,111 @@
+# {{ project_name }}
+
+Standalone paper discovery and conversion for {{ topic_description }}.
+
+## Architecture
+
+`papers_pipeline` validates configuration, fetches source records through
+adapters, normalizes and deduplicates them, applies topic gates, reconciles the
+inventory with the corpus, selects deterministic budgeted batches, converts
+inputs, formats changed files, updates the index, and commits each consistent
+stage. Source cursors share one fetch deadline. Conversion failures are
+isolated by paper; infrastructure failures stop the run.
+
+## Configuration
+
+`papers.yml` defines repository identity, enabled adapters, topic gates, fetch
+policy, conversion budgets, and concurrency. Run
+`uv run papers-pipeline validate --config papers.yml` before a manual run.
+Unknown keys, duplicate adapters, and invalid ranges are rejected.
+
+Adapter `lookback_days` is 1-365, `page_size` is 1-1000, `max_pages` is 1-100,
+and `max_results` is 1-10000. Semantic Scholar reads the API key from the
+environment variable named by `secret_env`; adapters without credentials use
+`secret_env: null`. The supported `filters` are:
+
+- `arxiv`: `search_query`
+- `semantic_scholar`: `query`
+- `dblp`: `query`
+- `biorxiv_crossref`: `provider`, set to `biorxiv` or `crossref`
+- `huggingface` and `papers_with_code`: no filter keys
+
+Topic gates support `include_any`, `include_all`, `exclude_any`, and
+`categories`. Set `plugin: topic_plugin:accept_topic` only when these gates
+cannot express the repository rule; the plugin accepts `Paper` and returns
+`TopicDecision`.
+
+Fetch request timeouts are 1-120 seconds, retries are 0-5, backoff is 0-30
+seconds, and the shared fetch deadline is 60-7200 seconds. Conversion allows
+1-20 batches per run, 1-100 papers per batch, and a total cost budget of
+1-1000. Per-paper HTML and LaTeX costs are 1-100; PDF cost is 1-1000. HTML and
+LaTeX concurrency is 1-4. PDF concurrency is always exactly 1.
+
+## Run locally
+
+```bash
+uv sync --locked --extra dev
+uv run papers-pipeline validate --config papers.yml
+uv run papers-pipeline nightly --config papers.yml
+uv run papers-pipeline format-corpus --shard-index 0 --shard-count 8
+```
+
+All tests use checked-in fixtures and run without source APIs or converter
+tools:
+
+```bash
+UV_OFFLINE=true uv run pytest
+uv run pre-commit run --all-files
+```
+
+## State, backlog, and recovery
+
+The nightly command derives backlog from `papers.csv` versus files under
+`papers/`. `.papers-state.yml` stores only source cursors and consecutive
+failure attempts. Count and cost budgets select deterministic batches.
+
+A paper failure does not stop peers. A third consecutive scheduled failure
+creates a colocated `.fixme.txt`; fix the input and remove the marker to retry.
+Missing tools, resource exhaustion, deadlines, and other infrastructure errors
+fail the run explicitly.
+
+## Formatting
+
+Nightly formatting receives only changed paper files and indexes. Complete
+corpus formatting runs only through the manual sharded workflow.
+
+## Automation and summaries
+
+The nightly Actions summary reports per-source fetched, accepted,
+deduplicated, and rejected counts; inventory, generated, pending, attempted,
+succeeded, failed, and fixme counts; timings; continuation, cap, retry, and
+deadline events; and fixme paths.
+
+The weekly template workflow runs Copier against an explicit release,
+validates the result, and opens a pull request. It never updates `main`
+directly.
+
+## Updating from the template
+
+Set the template repository variable used by the update workflow and run the
+weekly workflow, or wait for its schedule. The workflow resolves an immutable
+release, runs Copier, refreshes the lock, validates configuration, runs
+pre-commit and the offline test suite, and opens an update pull request for
+review. Resolve any `.rej` file as a failed update; never bypass validation or
+push an update directly to `main`.
+
+## Ownership boundary
+
+Copier owns pipeline code, tests, workflows, configuration scaffolding, and
+support files. `papers/`, `papers.csv`, `.papers-state.yml`, and caches remain
+repository-owned across Copier updates.
+
+## Migration gate
+
+Adoption by an existing papers repository is a separate migration. Do not begin a migration
+until this generated repository smoke test passes on the exact immutable
+template release selected for migration. Rehearse fixture
+adoption first; then migrate lipsync-papers, tts-papers, asr-papers, and
+birdclef-papers separately. Each migration must preserve corpus and Git
+history, add `papers.yml`, `.papers-state.yml`, and `.copier-answers.yml`, keep
+scheduling disabled, inspect the manual workflow and continuation behavior,
+and only then re-enable the schedule.
