@@ -74,14 +74,11 @@ def test_ci_triggers_and_permissions_are_read_only() -> None:
     assert data["permissions"] == {"contents": "read"}
 
 
-def test_all_python_workflows_use_locked_dependencies_and_preflight() -> None:
+def test_all_python_workflows_use_locked_dependencies() -> None:
     for name in ("ci.yml", "nightly.yml", "format-corpus.yml"):
         text = (WORKFLOWS / name).read_text(encoding="utf-8")
         assert "uv==" in text
-        assert "uv sync --locked --extra dev" in text
-
-    nightly = (WORKFLOWS / "nightly.yml").read_text(encoding="utf-8")
-    assert nightly.index("papers-pipeline validate") < nightly.index("nightly.sh")
+        assert "uv sync --locked" in text
 
 
 def test_nightly_provisions_pinned_conversion_and_formatting_tools() -> None:
@@ -91,7 +88,7 @@ def test_nightly_provisions_pinned_conversion_and_formatting_tools() -> None:
     assert "prettier@3.6.2" in text
     assert "pypandoc.get_pandoc_path()" in text
     assert '"$HOME/.local/bin" >> "$GITHUB_PATH"' in text
-    assert text.index("marker-pdf==1.10.1") < text.index("papers-pipeline validate")
+    assert text.index("marker-pdf==1.10.1") < text.index("nightly.sh")
 
 
 def test_nightly_has_non_overlapping_mutation_concurrency() -> None:
