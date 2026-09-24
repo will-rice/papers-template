@@ -76,7 +76,7 @@ def test_fetch_page_is_immutable() -> None:
     )
 
     with pytest.raises(Exception):
-        page.records = ()
+        setattr(page, "records", ())
 
 
 def test_fetch_window_is_immutable() -> None:
@@ -86,7 +86,7 @@ def test_fetch_window_is_immutable() -> None:
     )
 
     with pytest.raises(Exception):
-        window.start = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        setattr(window, "start", datetime(2024, 1, 2, tzinfo=timezone.utc))
 
 
 def test_fetch_window_rejects_naive_datetimes() -> None:

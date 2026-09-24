@@ -48,6 +48,7 @@ def workflow(name: str) -> dict[str, Any]:
 def test_actions_are_sha_pinned_and_jobs_and_steps_have_timeouts() -> None:
     paths = sorted(WORKFLOWS.glob("*.yml"))
     assert {path.name for path in paths} == {
+        "alphaxiv.yml",
         "ci.yml",
         "format-corpus.yml",
         "nightly.yml",
@@ -104,6 +105,27 @@ def test_nightly_never_runs_a_complete_corpus_glob() -> None:
     assert "format-corpus" not in text
     assert "papers/*.md" not in text
     assert "papers/**/*.md" not in text
+
+
+def test_alphaxiv_sync_is_read_only_and_configured() -> None:
+    data = workflow("alphaxiv.yml")
+    assert data["on"] == {
+        "workflow_run": {
+            "workflows": ["Nightly papers"],
+            "types": ["completed"],
+            "branches": ["main"],
+        },
+        "workflow_dispatch": None,
+    }
+    assert data["permissions"] == {"contents": "read"}
+    assert data["jobs"]["sync"]["if"] == "vars.ALPHAXIV_COLLECTION != ''"
+
+    sync_step = data["jobs"]["sync"]["steps"][-1]
+    assert sync_step["run"] == "uv run python -m papers_pipeline.alphaxiv_sync"
+    assert sync_step["env"] == {
+        "ALPHAXIV_API_KEY": "${{ secrets.ALPHAXIV_API_KEY }}",
+        "ALPHAXIV_COLLECTION": "${{ vars.ALPHAXIV_COLLECTION }}",
+    }
 
 
 def test_format_corpus_is_manual_only_and_opens_a_pr() -> None:

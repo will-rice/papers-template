@@ -48,7 +48,6 @@ class FetchPage(BaseModel):
 class Adapter(Protocol):
     name: str
     record_sources: frozenset[str]
-    window_type: type[FetchWindow]
 
     async def fetch(
         self,

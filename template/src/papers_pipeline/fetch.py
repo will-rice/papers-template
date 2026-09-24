@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from papers_pipeline.adapters.base import Adapter, FetchPage
+from papers_pipeline.adapters.base import Adapter, FetchPage, FetchWindow
 from papers_pipeline.config import AdapterConfig, PipelineConfig
 from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.http import Deadline, RequestClient
@@ -70,7 +70,7 @@ async def fetch_all(
 
         adapter = adapters[adapter_config.name]
         continuation = continuations.get(adapter.name)
-        window = adapter.window_type(
+        window = FetchWindow(
             start=(
                 continuation.window_start
                 if continuation

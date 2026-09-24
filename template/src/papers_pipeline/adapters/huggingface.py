@@ -21,7 +21,6 @@ class _CursorState(TypedDict):
 class HuggingFaceAdapter:
     name = "huggingface"
     record_sources = frozenset({"huggingface"})
-    window_type = FetchWindow
 
     async def fetch(
         self,

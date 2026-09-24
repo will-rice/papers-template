@@ -21,7 +21,7 @@ from papers_pipeline.convert import (
 )
 from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.http import RequestClient
-from papers_pipeline.models import FailureAttempt, Paper, PipelineState
+from papers_pipeline.models import FailureAttempt, InputFormat, Paper, PipelineState
 from papers_pipeline.remote import HttpResponse, RemoteDownloader
 
 NOW = datetime(2026, 9, 23, 2, 0, tzinfo=timezone.utc)
@@ -29,7 +29,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "conversion"
 CONCURRENCY = ConcurrencyConfig(html=2, latex=1, pdf=1)
 
 
-def paper(identifier: str, *, input_format: str) -> Paper:
+def paper(identifier: str, *, input_format: InputFormat) -> Paper:
     source = identifier.split(":", 1)[0]
     extension = {"html": "html", "latex": "tex", "pdf": "pdf"}[input_format]
     return Paper(
@@ -40,7 +40,7 @@ def paper(identifier: str, *, input_format: str) -> Paper:
         published=datetime(2024, 1, 2, tzinfo=timezone.utc),
         url=f"https://example.test/{identifier}",
         source=source,
-        input_format=input_format,  # type: ignore[arg-type]
+        input_format=input_format,
         input_url=f"https://example.test/inputs/{identifier.replace(':', '-')}.{extension}",
         categories=("cs.CL",),
     )
@@ -599,11 +599,11 @@ async def test_http_408_aborts_mixed_batch_without_mutating_failure_state(
     )
 
     class MixedMaterializer:
-        async def materialize(self, target: Paper, root: Path) -> Path:
-            if target == timed_out:
-                await remote.download(target.input_url, 1)
+        async def materialize(self, paper: Paper, root: Path) -> Path:
+            if paper == timed_out:
+                await remote.download(paper.input_url, 1)
                 raise AssertionError("408 download returned")
-            return await successful_materializer.materialize(target, root)
+            return await successful_materializer.materialize(paper, root)
 
     for _ in range(2):
         with pytest.raises(InfrastructureError, match="HTTP 408"):

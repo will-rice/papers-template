@@ -13,7 +13,6 @@ from papers_pipeline.models import SourceRecord
 class DblpAdapter:
     name = "dblp"
     record_sources = frozenset({"dblp"})
-    window_type = FetchWindow
 
     async def fetch(
         self,

@@ -14,7 +14,6 @@ from papers_pipeline.models import SourceRecord
 class SemanticScholarAdapter:
     name = "semantic_scholar"
     record_sources = frozenset({"semantic_scholar"})
-    window_type = FetchWindow
 
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key

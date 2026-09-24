@@ -191,7 +191,9 @@ def _strong_keys(paper: Paper) -> set[str]:
     arxiv_id = _canonical_arxiv_id(paper.arxiv_id)
     doi = _canonical_doi(paper.doi)
     if arxiv_id:
-        keys.add(f"arxiv:{arxiv_id}")
+        # Versions of one arXiv paper are the same paper; the preferred
+        # (lexicographically first) identifier is kept, so file names are stable.
+        keys.add(f"arxiv:{re.sub(r'v\d+$', '', arxiv_id)}")
     if doi:
         keys.add(f"doi:{doi}")
     return keys

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from papers_pipeline.adapters.base import Adapter
+from papers_pipeline.adapters.base import Adapter, FetchWindow
 from papers_pipeline.config import AdapterConfig
 from papers_pipeline.http import RequestClient
 
@@ -12,7 +12,7 @@ async def assert_adapter_contract(
     adapter: Adapter, client: RequestClient, config: AdapterConfig
 ) -> None:
     page = await adapter.fetch(
-        window=adapter.window_type(start=WINDOW_START, end=WINDOW_END),
+        window=FetchWindow(start=WINDOW_START, end=WINDOW_END),
         cursor=None,
         client=client,
         config=config,

@@ -11,10 +11,10 @@ from papers_pipeline.batching import (
     select_batch,
 )
 from papers_pipeline.config import ConversionConfig
-from papers_pipeline.models import Paper
+from papers_pipeline.models import InputFormat, Paper
 
 
-def paper(identifier: str, *, input_format: str = "pdf") -> Paper:
+def paper(identifier: str, *, input_format: InputFormat = "pdf") -> Paper:
     return Paper(
         identifier=identifier,
         title=f"{identifier} title",
@@ -23,7 +23,7 @@ def paper(identifier: str, *, input_format: str = "pdf") -> Paper:
         published=datetime(2024, 1, 2, tzinfo=timezone.utc),
         url=f"https://example.test/{identifier}",
         source="arxiv",
-        input_format=input_format,  # type: ignore[arg-type]
+        input_format=input_format,
         input_url=f"https://example.test/{identifier}.{input_format}",
         categories=("cs.CL",),
     )

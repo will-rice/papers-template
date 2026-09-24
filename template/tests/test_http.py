@@ -275,7 +275,9 @@ async def test_non_retryable_404_fails_immediately(
 
 @pytest.mark.asyncio
 async def test_request_client_supports_clean_shutdown(
-    fetch_config: FetchConfig, fake_clock: FakeClock
+    fetch_config: FetchConfig,
+    fake_clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     transport = httpx.MockTransport(lambda _: httpx.Response(200, text="ok"))
     closed = False
@@ -286,7 +288,7 @@ async def test_request_client_supports_clean_shutdown(
         closed = True
         await original_aclose()
 
-    transport.aclose = tracking_aclose  # type: ignore[method-assign]
+    monkeypatch.setattr(transport, "aclose", tracking_aclose)
     client = RequestClient(
         fetch_config,
         Deadline.start(30, fake_clock),

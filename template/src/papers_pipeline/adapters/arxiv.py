@@ -16,7 +16,6 @@ ATOM = {"a": "http://www.w3.org/2005/Atom"}
 class ArxivAdapter:
     name = "arxiv"
     record_sources = frozenset({"arxiv"})
-    window_type = FetchWindow
 
     async def fetch(
         self,
