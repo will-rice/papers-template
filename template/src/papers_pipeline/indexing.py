@@ -3,18 +3,44 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+from papers_pipeline.errors import InfrastructureError
 from papers_pipeline.models import Paper
+
+_START_MARKER = b"<!-- papers-index:start -->"
+_END_MARKER = b"<!-- papers-index:end -->"
 
 
 def write_index(root: Path, papers: Sequence[Paper]) -> Path:
     path = root / "README.md"
-    content = _render_index(papers)
-    if path.exists() and path.read_text(encoding="utf-8") == content:
+    try:
+        existing = path.read_bytes()
+    except OSError as error:
+        raise InfrastructureError(
+            "README generated-section markers are unavailable"
+        ) from error
+    start = _unique_marker_offset(existing, _START_MARKER, "start")
+    end = _unique_marker_offset(existing, _END_MARKER, "end")
+    if start >= end:
+        raise InfrastructureError("README generated-section markers are out of order")
+
+    generated = ("\n" + _render_index(papers)).encode("utf-8")
+    content = existing[: start + len(_START_MARKER)] + generated + existing[end:]
+    if existing == content:
         return path
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_bytes(content)
     return path
+
+
+def _unique_marker_offset(content: bytes, marker: bytes, name: str) -> int:
+    count = content.count(marker)
+    if count == 0:
+        raise InfrastructureError(f"README generated section is missing {name} marker")
+    if count > 1:
+        raise InfrastructureError(
+            f"README generated section has duplicate {name} marker"
+        )
+    return content.index(marker)
 
 
 def _render_index(papers: Sequence[Paper]) -> str:

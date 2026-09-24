@@ -167,6 +167,15 @@ def test_shard_paths_validates_bounds(
 def test_write_index_is_deterministic_and_skips_unchanged_rewrites(
     tmp_path: Path,
 ) -> None:
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "# Custom documentation\n\n"
+        "<!-- papers-index:start -->\n"
+        "old generated content\n"
+        "<!-- papers-index:end -->\n"
+        "\n## Hand-written notes\n\nKeep this exactly.\n",
+        encoding="utf-8",
+    )
     papers = (
         paper("paper:3", published=datetime(2025, 1, 3, 9, tzinfo=timezone.utc)),
         paper("paper:1", published=datetime(2025, 1, 1, 9, tzinfo=timezone.utc)),
@@ -186,3 +195,69 @@ def test_write_index_is_deterministic_and_skips_unchanged_rewrites(
     assert first_mtime == second_mtime
     assert first_content.endswith("\n")
     assert first_content.count("|") > 0
+
+
+def test_write_index_preserves_bytes_outside_generated_section(tmp_path: Path) -> None:
+    prefix = (
+        b"# Custom documentation\r\n\r\n"
+        b"Keep  trailing spaces.  \r\n"
+        b"<!-- papers-index:start -->"
+    )
+    suffix = (
+        b"<!-- papers-index:end -->\r\n"
+        b"\r\n## Hand-written notes\r\n\r\nDo not rewrite me.\r\n"
+    )
+    readme = tmp_path / "README.md"
+    readme.write_bytes(prefix + b"\nold\n" + suffix)
+
+    write_index(
+        tmp_path,
+        (paper("paper:1", published=datetime(2025, 1, 1, tzinfo=timezone.utc)),),
+    )
+    first = readme.read_bytes()
+    write_index(
+        tmp_path,
+        (paper("paper:1", published=datetime(2025, 1, 1, tzinfo=timezone.utc)),),
+    )
+
+    assert first.startswith(prefix)
+    assert first.endswith(suffix)
+    assert readme.read_bytes() == first
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("# no markers\n", "missing start marker"),
+        (
+            "<!-- papers-index:start -->\nmissing end\n",
+            "missing end marker",
+        ),
+        (
+            "<!-- papers-index:end -->\n<!-- papers-index:start -->\n",
+            "markers are out of order",
+        ),
+        (
+            "<!-- papers-index:start -->\n<!-- papers-index:start -->\n"
+            "<!-- papers-index:end -->\n",
+            "duplicate start marker",
+        ),
+        (
+            "<!-- papers-index:start -->\n<!-- papers-index:end -->\n"
+            "<!-- papers-index:end -->\n",
+            "duplicate end marker",
+        ),
+    ],
+)
+def test_write_index_rejects_invalid_marker_layout(
+    tmp_path: Path,
+    content: str,
+    message: str,
+) -> None:
+    readme = tmp_path / "README.md"
+    readme.write_text(content, encoding="utf-8")
+
+    with pytest.raises(InfrastructureError, match=message):
+        write_index(tmp_path, ())
+
+    assert readme.read_text(encoding="utf-8") == content

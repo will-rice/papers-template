@@ -254,6 +254,8 @@ def test_generated_readme_documents_operations_and_migration_gate(
         )
 
     readme = (destination / "README.md").read_text(encoding="utf-8")
+    assert readme.count("<!-- papers-index:start -->") == 1
+    assert readme.count("<!-- papers-index:end -->") == 1
     for heading in (
         "# Sample Papers",
         "## Architecture",
@@ -270,3 +272,34 @@ def test_generated_readme_documents_operations_and_migration_gate(
     assert "PDF concurrency is always exactly 1" in readme
     assert "`will-rice/papers-template`" in readme
     assert "Do not begin a migration" in readme
+
+    before = readme.encode()
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(destination / "src")
+    command = (
+        "from pathlib import Path; "
+        "from papers_pipeline.indexing import write_index; "
+        "write_index(Path.cwd(), ())"
+    )
+    subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=destination,
+        env=environment,
+        check=True,
+    )
+    after = (destination / "README.md").read_bytes()
+    start = before.index(b"<!-- papers-index:start -->")
+    end = before.index(b"<!-- papers-index:end -->")
+    after_start = after.index(b"<!-- papers-index:start -->")
+    after_end = after.index(b"<!-- papers-index:end -->")
+    assert after[:start] == before[:start]
+    assert after[after_end:] == before[end:]
+
+    subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=destination,
+        env=environment,
+        check=True,
+    )
+    assert (destination / "README.md").read_bytes() == after
+    assert after_start == start

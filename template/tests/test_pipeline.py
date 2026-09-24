@@ -23,6 +23,15 @@ from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
 from papers_pipeline.state import load_state
 
 NOW = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
+INITIAL_README = (
+    b"# Test Papers\n\n"
+    b"<!-- papers-index:start -->\n"
+    b"# Papers\n\n"
+    b"| Published | Identifier | Title | Source |\n"
+    b"| --- | --- | --- | --- |\n"
+    b"<!-- papers-index:end -->\n\n"
+    b"## Notes\n\nPreserve this section.\n"
+)
 
 
 def record(identifier: str) -> SourceRecord:
@@ -181,6 +190,7 @@ def make_paths(
     }
     config_path = tmp_path / "papers.yml"
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    (tmp_path / "README.md").write_bytes(INITIAL_README)
     return PipelinePaths(
         root=tmp_path,
         config=config_path,
@@ -359,7 +369,6 @@ async def test_formatter_failure_restores_batch_outputs_state_and_index(
 ) -> None:
     paths = make_paths(tmp_path)
     index = paths.root / "README.md"
-    index.write_bytes(b"# Existing index\n")
     index_before = index.read_bytes()
     git = RecordingGit()
     runner = FakeRunner(
@@ -404,7 +413,7 @@ async def test_state_save_failure_restores_batch_outputs_and_index(
         )
 
     assert not paths.state.exists()
-    assert not (paths.root / "README.md").exists()
+    assert (paths.root / "README.md").read_bytes() == INITIAL_README
     assert list((paths.root / "papers").glob("*")) == []
     assert git.messages == ["chore: update paper inventory"]
 
@@ -422,7 +431,7 @@ async def test_batch_commit_failure_rolls_back_and_later_retry_succeeds(
             dependencies(FakeAdapter([record("one")]), FakeRunner(), failing_git),
         )
 
-    assert not (paths.root / "README.md").exists()
+    assert (paths.root / "README.md").read_bytes() == INITIAL_README
     assert list((paths.root / "papers").glob("*")) == []
     assert failing_git.cleared[-1]
 
