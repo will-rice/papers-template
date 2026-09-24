@@ -267,6 +267,11 @@ def _provider(config: AdapterConfig) -> str:
     return provider
 
 
+def biorxiv_pdf_url(doi: str) -> str:
+    """Return the full-text PDF URL bioRxiv serves for a preprint DOI."""
+    return f"https://www.biorxiv.org/content/{doi}.full.pdf"
+
+
 def parse_biorxiv(item: object) -> SourceRecord:
     if not isinstance(item, dict):
         raise PaperError("bioRxiv record lacks DOI, title, or date")
@@ -294,7 +299,7 @@ def parse_biorxiv(item: object) -> SourceRecord:
         published=published_at,
         url=f"https://doi.org/{doi}",
         input_format="pdf",
-        input_url=f"https://www.biorxiv.org/content/{doi}.full.pdf",
+        input_url=biorxiv_pdf_url(doi),
         categories=(category,) if category else (),
     )
 
