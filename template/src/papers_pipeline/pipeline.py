@@ -230,9 +230,6 @@ async def run_nightly(
             summary.generated = len(backlog.generated)
             summary.pending = len(backlog.pending)
 
-        backlog = infer_backlog(inventory, paths.root)
-        summary.generated = len(backlog.generated)
-        summary.pending = len(backlog.pending)
         if summary.pending:
             summary.events.append(
                 f"continuation required: {summary.pending} papers remain pending"

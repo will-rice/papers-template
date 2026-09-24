@@ -48,7 +48,6 @@ jobs:
           TEMPLATE_REPOSITORY: will-rice/papers-template
         run: |
           ref="$(gh api "repos/$TEMPLATE_REPOSITORY/releases/latest" --jq .tag_name)"
-          test -n "$ref"
           printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
       - name: Update and validate repository
         id: update
