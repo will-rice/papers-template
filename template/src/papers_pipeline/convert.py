@@ -14,12 +14,11 @@ from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-import httpx
-
 from papers_pipeline.batching import Batch, expected_markdown
 from papers_pipeline.config import ConcurrencyConfig
 from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
+from papers_pipeline.remote import RemoteDownloader
 
 _CONVERSION_TIMEOUT = 900.0
 _PROCESS_SHUTDOWN_TIMEOUT = 2.0
@@ -361,29 +360,7 @@ async def convert_batch(
 
 
 async def _download_bytes(url: str, timeout: float) -> bytes:
-    try:
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            response = await client.get(url, timeout=timeout)
-    except httpx.TimeoutException as error:
-        raise InfrastructureError(f"conversion input timeout: {url}") from error
-    except httpx.NetworkError as error:
-        raise InfrastructureError(f"conversion input network failure: {url}") from error
-    except httpx.RequestError as error:
-        raise InfrastructureError(f"conversion input request failed: {url}") from error
-
-    if response.status_code in {401, 403}:
-        raise InfrastructureError(f"conversion input authentication failed: {url}")
-    if 300 <= response.status_code < 400:
-        raise InfrastructureError(
-            f"conversion input redirect HTTP {response.status_code}: {url}"
-        )
-    if 400 <= response.status_code < 500 and response.status_code != 429:
-        raise PaperError(f"conversion input HTTP {response.status_code}: {url}")
-    if response.is_error:
-        raise InfrastructureError(
-            f"conversion input HTTP {response.status_code}: {url}"
-        )
-    return bytes(response.content)
+    return await RemoteDownloader().download(url, timeout)
 
 
 def _materialized_name(paper: Paper, input_url: str) -> str:

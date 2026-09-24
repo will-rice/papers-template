@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-import httpx
+
 
 from papers_pipeline.batching import Batch, expected_markdown, infer_backlog
 from papers_pipeline.adapters.arxiv import ArxivAdapter
@@ -21,11 +21,11 @@ from papers_pipeline.convert import (
     DownloadingMaterializer,
     MaterializedInput,
     convert_batch,
-    _download_bytes,
 )
 from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.http import RequestClient
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
+from papers_pipeline.remote import HttpResponse, RemoteDownloader
 
 NOW = datetime(2026, 9, 23, 2, 0, tzinfo=timezone.utc)
 FIXTURES = Path(__file__).parent / "fixtures" / "conversion"
@@ -316,7 +316,6 @@ async def test_downloading_materializer_materializes_remote_input_to_local_file(
 async def test_arxiv_adapter_pdf_url_downloads_without_redirect(
     arxiv_client: RequestClient,
     arxiv_config: AdapterConfig,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     page = await ArxivAdapter().fetch(
         FetchWindow(
@@ -329,23 +328,18 @@ async def test_arxiv_adapter_pdf_url_downloads_without_redirect(
     )
     adapter_url = page.records[0].input_url
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url) == adapter_url:
-            return httpx.Response(200, content=b"%PDF fixture")
-        if str(request.url) == f"{adapter_url}.pdf":
-            return httpx.Response(302, headers={"location": adapter_url})
-        raise AssertionError(f"unexpected URL: {request.url}")
-
-    transport = httpx.MockTransport(handler)
-    original_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        "papers_pipeline.convert.httpx.AsyncClient",
-        lambda **kwargs: original_client(transport=transport, **kwargs),
+    successful = RemoteDownloader(
+        resolver=FakeResolver(("8.8.8.8",)),
+        connector=FakeConnector(HttpResponse(status_code=200, content=b"%PDF fixture")),
+    )
+    redirected = RemoteDownloader(
+        resolver=FakeResolver(("8.8.8.8",)),
+        connector=FakeConnector(HttpResponse(status_code=302, content=b"")),
     )
 
-    assert await _download_bytes(adapter_url, 1) == b"%PDF fixture"
+    assert await successful.download(adapter_url, 1) == b"%PDF fixture"
     with pytest.raises(InfrastructureError, match="redirect HTTP 302"):
-        await _download_bytes(f"{adapter_url}.pdf", 1)
+        await redirected.download(f"{adapter_url}.pdf", 1)
 
 
 @pytest.mark.asyncio
@@ -375,33 +369,210 @@ async def test_downloading_materializer_maps_disk_errors_to_infrastructure_error
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [400, 404, 410, 422])
 async def test_permanent_download_http_errors_are_paper_errors(
-    monkeypatch: pytest.MonkeyPatch,
     status_code: int,
 ) -> None:
-    class Client:
-        async def __aenter__(self) -> "Client":
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def get(self, url: str, timeout: float) -> object:
-            return type(
-                "Response",
-                (),
-                {
-                    "status_code": status_code,
-                    "is_error": True,
-                    "content": b"",
-                },
-            )()
-
-    monkeypatch.setattr(
-        "papers_pipeline.convert.httpx.AsyncClient", lambda **_: Client()
+    downloader = RemoteDownloader(
+        resolver=FakeResolver(("8.8.8.8",)),
+        connector=FakeConnector(HttpResponse(status_code=status_code, content=b"")),
     )
 
     with pytest.raises(PaperError, match=f"HTTP {status_code}"):
-        await _download_bytes("https://example.test/missing.pdf", 1)
+        await downloader.download("https://example.test/missing.pdf", 1)
+
+
+class FakeResolver:
+    def __init__(
+        self,
+        addresses: tuple[str, ...] = ("203.0.113.8",),
+        error: OSError | None = None,
+    ) -> None:
+        self.addresses = addresses
+        self.error = error
+        self.calls: list[tuple[str, int]] = []
+
+    async def resolve(self, host: str, port: int) -> tuple[str, ...]:
+        self.calls.append((host, port))
+        if self.error is not None:
+            raise self.error
+        return self.addresses
+
+
+class FakeConnector:
+    def __init__(
+        self,
+        response: HttpResponse = HttpResponse(status_code=200, content=b"paper"),
+        error: OSError | None = None,
+    ) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def get(self, **kwargs: object) -> HttpResponse:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://public.example/paper.pdf",
+        "https://user:password@public.example/paper.pdf",
+        "https://localhost/paper.pdf",
+        "https://api.localhost/paper.pdf",
+        "http://127.0.0.1/paper.pdf",
+        "http://10.0.0.1/paper.pdf",
+        "http://[::1]/paper.pdf",
+        "http://[fc00::1]/paper.pdf",
+    ],
+)
+async def test_remote_downloader_rejects_unsafe_urls_before_connect(url: str) -> None:
+    resolver = FakeResolver()
+    connector = FakeConnector()
+
+    with pytest.raises(PaperError):
+        await RemoteDownloader(resolver=resolver, connector=connector).download(url, 1)
+
+    assert resolver.calls == []
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_rejects_private_or_mixed_dns_results() -> None:
+    for addresses in [
+        ("10.0.0.1",),
+        ("203.0.113.8", "192.168.1.2"),
+        ("2001:4860:4860::8888", "::1"),
+    ]:
+        connector = FakeConnector()
+        with pytest.raises(PaperError, match="non-public address"):
+            await RemoteDownloader(
+                resolver=FakeResolver(addresses), connector=connector
+            ).download("https://papers.example/paper.pdf", 1)
+        assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_pins_public_address_and_preserves_origin() -> None:
+    resolver = FakeResolver(("2001:4860:4860::8888", "8.8.8.8"))
+    connector = FakeConnector()
+
+    payload = await RemoteDownloader(resolver=resolver, connector=connector).download(
+        "https://papers.example:8443/path/paper.pdf?download=1", 12
+    )
+
+    assert payload == b"paper"
+    assert connector.calls == [
+        {
+            "scheme": "https",
+            "address": "8.8.8.8",
+            "port": 8443,
+            "target": "/path/paper.pdf?download=1",
+            "host_header": "papers.example:8443",
+            "tls_server_name": "papers.example",
+            "timeout": 12,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",
+        "10.0.0.1",
+        "169.254.1.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+        "100::1",
+        "::",
+    ],
+)
+async def test_remote_downloader_rejects_every_non_public_address_class(
+    address: str,
+) -> None:
+    connector = FakeConnector()
+
+    with pytest.raises(PaperError, match="non-public address"):
+        await RemoteDownloader(
+            resolver=FakeResolver((address,)),
+            connector=connector,
+        ).download("https://papers.example/paper.pdf", 1)
+
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [OSError("DNS failed"), OSError("socket failed")])
+async def test_remote_downloader_maps_resolution_and_socket_errors_to_infrastructure(
+    failure: OSError,
+) -> None:
+    if "DNS" in str(failure):
+        downloader = RemoteDownloader(
+            resolver=FakeResolver(error=failure), connector=FakeConnector()
+        )
+    else:
+        downloader = RemoteDownloader(
+            resolver=FakeResolver(("8.8.8.8",)),
+            connector=FakeConnector(error=failure),
+        )
+
+    with pytest.raises(InfrastructureError):
+        await downloader.download("https://papers.example/paper.pdf", 1)
+
+
+@pytest.mark.asyncio
+async def test_http_408_aborts_mixed_batch_without_mutating_failure_state(
+    tmp_path: Path,
+) -> None:
+    timed_out = paper("arxiv:timeout", input_format="html")
+    successful = paper("arxiv:success", input_format="html")
+    prior_state = PipelineState(
+        failures={
+            timed_out.identifier: [
+                FailureAttempt(occurred_at=NOW.replace(day=21), error="old failure"),
+                FailureAttempt(occurred_at=NOW.replace(day=22), error="old failure"),
+            ]
+        }
+    )
+    connector = FakeConnector(HttpResponse(status_code=408, content=b""))
+    remote = RemoteDownloader(resolver=FakeResolver(("8.8.8.8",)), connector=connector)
+    successful_materializer = FakeMaterializer(
+        fixtures={successful.input_url: fixture_for(successful)}
+    )
+
+    class MixedMaterializer:
+        async def materialize(self, target: Paper, root: Path) -> MaterializedInput:
+            if target == timed_out:
+                await remote.download(target.input_url, 1)
+                raise AssertionError("408 download returned")
+            return await successful_materializer.materialize(target, root)
+
+    for _ in range(2):
+        with pytest.raises(InfrastructureError, match="HTTP 408"):
+            await convert_batch(
+                Batch(papers=(successful, timed_out), estimated_cost=2),
+                tmp_path,
+                prior_state,
+                CONCURRENCY,
+                TrackingRunner(materializer=successful_materializer),
+                MixedMaterializer(),
+                NOW,
+            )
+        assert prior_state.failures[timed_out.identifier][0].error == "old failure"
+        assert len(prior_state.failures[timed_out.identifier]) == 2
+        assert (
+            not expected_markdown(tmp_path, timed_out)
+            .with_suffix(".fixme.txt")
+            .exists()
+        )
 
 
 @pytest.mark.asyncio
