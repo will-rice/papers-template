@@ -8,10 +8,12 @@ submitted,categories,url,abstract[,source]`` and markdown at
 
     uv run python /path/to/papers-template/scripts/migrate_legacy_corpus.py
 
-It rewrites ``papers.csv`` in the template schema, ``git mv``s every legacy
-markdown file to the path the pipeline expects, rewrites in-corpus links,
-replaces legacy front matter with the pipeline's, removes the legacy
-per-year indexes, and writes an empty ``.papers-state.yml``. Identifiers come
+It ``git mv``s every legacy markdown file to the path the pipeline expects,
+removes the legacy per-year indexes, and commits those moves alone, so every
+paper keeps its history as an exact rename. It then rewrites ``papers.csv`` in
+the template schema, rewrites in-corpus links, replaces legacy front matter
+with the pipeline's, and writes an empty ``.papers-state.yml``, leaving those
+changes uncommitted. Identifiers come
 from the pipeline's own ``normalize`` and ``deduplicate``, so the first nightly
 run sees every converted paper as already generated.
 
@@ -54,6 +56,11 @@ from papers_pipeline.normalize import clean, deduplicate, normalize
 from papers_pipeline.state import save_state
 
 LEGACY_REF = "HEAD"
+MOVE_COMMIT_MESSAGE = (
+    "chore: move legacy papers to the template layout\n\n"
+    "Pure renames, committed alone so git log --follow keeps each paper's\n"
+    "history; in-corpus links and front matter are rewritten afterwards."
+)
 # Legacy ID prefix -> template adapter name. Bare IDs are arXiv IDs.
 SOURCES = {
     "": "arxiv",
@@ -115,6 +122,20 @@ def migrate(root: Path, client: httpx.Client) -> None:
                 root, "mv", str(source.relative_to(root)), str(target.relative_to(root))
             )
 
+    for index in [
+        root / "papers" / "README.md",
+        *(root / "papers").glob("*/README.md"),
+    ]:
+        if index.exists():
+            git(root, "rm", "-q", str(index.relative_to(root)))
+    # Legacy year directories hold only markdown; rmdir fails if any remains.
+    for year in (root / "papers").glob("*/"):
+        year.rmdir()
+    # Commit the moves alone: unchanged files are exact renames, so git log
+    # --follow keeps every paper's history. Only staged moves and removals are
+    # under papers/ here; new fixme markers are untracked and stay out.
+    git(root, "commit", "-q", "-m", MOVE_COMMIT_MESSAGE, "--", "papers")
+
     for path in (root / "papers").glob("*.md"):
         text = path.read_text(encoding="utf-8")
         rewritten = LEGACY_LINK.sub(
@@ -127,16 +148,6 @@ def migrate(root: Path, client: httpx.Client) -> None:
         )
         if rewritten != text:
             path.write_text(rewritten, encoding="utf-8")
-
-    for index in [
-        root / "papers" / "README.md",
-        *(root / "papers").glob("*/README.md"),
-    ]:
-        if index.exists():
-            git(root, "rm", "-q", str(index.relative_to(root)))
-    # Legacy year directories hold only markdown; rmdir fails if any remains.
-    for year in (root / "papers").glob("*/"):
-        year.rmdir()
 
     write_inventory(root / "papers.csv", papers)
     # Replace legacy front matter with the pipeline's, so every paper is
