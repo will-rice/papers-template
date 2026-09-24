@@ -173,20 +173,8 @@ class DownloadingMaterializer:
         self._downloader = downloader or _download_bytes
 
     async def materialize(self, paper: Paper, root: Path) -> MaterializedInput:
-        parts = urlsplit(paper.input_url)
-        if parts.scheme in {"", "file"}:
-            local_path = Path(parts.path)
-            if not local_path.exists():
-                raise InfrastructureError(
-                    f"conversion input missing: {paper.input_url}"
-                )
-            return MaterializedInput(local_path=local_path)
-        if parts.scheme not in {"http", "https"}:
-            raise PaperError(f"unsupported conversion input URL: {paper.input_url}")
-        if not parts.hostname:
-            raise PaperError(f"invalid conversion input URL: {paper.input_url}")
-
-        suffix = Path(parts.path).suffix or _default_suffix(paper)
+        # The downloader validates the URL scheme, host and resolved addresses.
+        suffix = Path(urlsplit(paper.input_url).path).suffix or _default_suffix(paper)
         target = (
             root / "inputs" / f"{_materialized_name(paper, paper.input_url)}{suffix}"
         )

@@ -339,7 +339,7 @@ async def test_arxiv_adapter_pdf_url_downloads_without_redirect(
     )
 
     assert await successful.download(adapter_url, 1) == b"%PDF fixture"
-    with pytest.raises(InfrastructureError, match="redirect HTTP 302"):
+    with pytest.raises(PaperError, match="redirect without location"):
         await redirected.download(f"{adapter_url}.pdf", 1)
 
 
@@ -399,12 +399,14 @@ class FakeResolver:
 
 
 class FakeConnector:
+    """Return responses in order, repeating the last one."""
+
     def __init__(
         self,
-        response: HttpResponse = HttpResponse(status_code=200, content=b"paper"),
+        *responses: HttpResponse,
         error: OSError | None = None,
     ) -> None:
-        self.response = response
+        self.responses = responses or (HttpResponse(status_code=200, content=b"paper"),)
         self.error = error
         self.calls: list[dict[str, object]] = []
 
@@ -412,7 +414,7 @@ class FakeConnector:
         self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return self.response
+        return self.responses[min(len(self.calls), len(self.responses)) - 1]
 
 
 @pytest.mark.asyncio
@@ -476,6 +478,60 @@ async def test_remote_downloader_pins_public_address_and_preserves_origin() -> N
             "timeout": 12,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_follows_redirects_revalidating_each_hop() -> None:
+    resolver = FakeResolver(("8.8.8.8",))
+    connector = FakeConnector(
+        HttpResponse(302, b"", location="https://publisher.example/paper"),
+        HttpResponse(301, b"", location="/paper.html"),
+        HttpResponse(200, b"paper"),
+    )
+
+    payload = await RemoteDownloader(resolver=resolver, connector=connector).download(
+        "https://doi.org/10.1000/FIXTURE", 1
+    )
+
+    assert payload == b"paper"
+    assert resolver.calls == [
+        ("doi.org", 443),
+        ("publisher.example", 443),
+        ("publisher.example", 443),
+    ]
+    assert [call["target"] for call in connector.calls] == [
+        "/10.1000/FIXTURE",
+        "/paper",
+        "/paper.html",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_rejects_redirect_to_private_address() -> None:
+    connector = FakeConnector(
+        HttpResponse(302, b"", location="http://10.0.0.1/paper.pdf")
+    )
+
+    with pytest.raises(PaperError, match="non-public address"):
+        await RemoteDownloader(
+            resolver=FakeResolver(("8.8.8.8",)), connector=connector
+        ).download("https://doi.org/10.1000/FIXTURE", 1)
+
+    assert len(connector.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_bounds_redirect_chains() -> None:
+    connector = FakeConnector(
+        HttpResponse(302, b"", location="https://doi.org/10.1000/FIXTURE")
+    )
+
+    with pytest.raises(PaperError, match="exceeded 5 redirects"):
+        await RemoteDownloader(
+            resolver=FakeResolver(("8.8.8.8",)), connector=connector
+        ).download("https://doi.org/10.1000/FIXTURE", 1)
+
+    assert len(connector.calls) == 6
 
 
 @pytest.mark.asyncio

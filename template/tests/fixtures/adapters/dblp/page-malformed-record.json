@@ -20,7 +20,8 @@
             "title": "Broken DBLP Fixture",
             "authors": {"author": [{"text": "B. Author"}]},
             "year": "2024",
-            "doi": "10.1000/BROKEN"
+            "doi": "10.1000/BROKEN",
+            "url": "db/conf/test/Broken24"
           }
         }
       ]
