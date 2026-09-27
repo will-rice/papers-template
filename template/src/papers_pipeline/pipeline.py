@@ -195,6 +195,11 @@ async def run_nightly(
                         dependencies.materializer,
                         dependencies.now(),
                         timeout_seconds=config.conversion.timeout_seconds,
+                        # The deadline also bounds a running batch: one batch
+                        # of slow PDFs could otherwise outlast the job timeout,
+                        # which discards every unpushed batch commit.
+                        time_budget_seconds=config.conversion.deadline_seconds
+                        - (dependencies.monotonic() - run_started),
                     )
                 state = converted.state
                 summary.succeeded += len(converted.succeeded)
@@ -214,6 +219,10 @@ async def run_nightly(
                 summary.events.extend(
                     f"conversion deferred: {item.paper.identifier}: {item.error}"
                     for item in converted.deferred
+                )
+                summary.events.extend(
+                    f"conversion deadline interrupted: {paper.identifier}"
+                    for paper in converted.interrupted
                 )
 
                 index_before = _file_content(index_path)
