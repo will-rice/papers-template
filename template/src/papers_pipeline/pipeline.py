@@ -140,10 +140,17 @@ async def run_nightly(
 
         attempted: set[str] = set()
         batch_number = 0
+        # Only batches that attempted a conversion count toward the budget: a
+        # batch of papers deferred by a rate-limited host costs nothing, and
+        # counting it would let one such host starve every other pending
+        # paper. Each paper is tried at most once, so the loop still ends.
+        working_batches = 0
         backlog = infer_backlog(inventory, paths.root)
         summary.generated = len(backlog.generated)
         summary.pending = len(backlog.pending)
-        while backlog.pending and batch_number < config.conversion.max_batches_per_run:
+        while (
+            backlog.pending and working_batches < config.conversion.max_batches_per_run
+        ):
             if (
                 dependencies.monotonic() - run_started
                 >= config.conversion.deadline_seconds
@@ -193,6 +200,8 @@ async def run_nightly(
                 summary.succeeded += len(converted.succeeded)
                 summary.failed += len(converted.failed)
                 summary.deferred += len(converted.deferred)
+                if len(converted.deferred) < len(batch.papers):
+                    working_batches += 1
                 summary.promoted_to_fixme += len(converted.promoted)
                 summary.fixme_paths.extend(str(path) for path in converted.promoted)
                 summary.events.extend(
