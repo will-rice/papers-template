@@ -21,7 +21,8 @@ isolated by paper; infrastructure failures stop the run.
 
 The corpus is built to be browsed by people and LLMs. Every paper in `papers/`
 starts with YAML front matter (identifier, title, authors, published date, URL,
-source, DOI, arXiv ID, and categories), and the index below links each
+source, DOI, arXiv ID, and categories). `papers.csv` lists every paper in
+publication order, and the index below shows its 30 most recent, linking each
 converted paper to its local markdown file. Run `papers-pipeline front-matter`
 to refresh the front matter of every converted paper from `papers.csv`.
 
