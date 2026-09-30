@@ -12,6 +12,7 @@ dependencies = [
   "PyYAML>=6.0,<7",
   "types-PyYAML>=6.0.12,<7",
   "httpx>=0.28,<0.29",
+  "pillow>=11.3,<12",
 ]
 
 [tool.pytest.ini_options]
