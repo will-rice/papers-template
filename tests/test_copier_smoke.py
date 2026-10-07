@@ -78,6 +78,7 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     assert (destination / "papers.yml").is_file()
     assert (destination / "papers.schema.json").is_file()
     assert (destination / "topic_plugin.py").is_file()
+    assert (destination / "llms.txt").read_text(encoding="utf-8").startswith("# ")
     assert (destination / ".github/workflows/ci.yml").is_file()
     assert (destination / ".github/workflows/nightly.yml").is_file()
     assert (destination / ".github/workflows/format-corpus.yml").is_file()
