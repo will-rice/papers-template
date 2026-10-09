@@ -99,7 +99,10 @@ PDF concurrency is always exactly 1.
 
 ```bash
 uv sync --locked --extra dev
-uv tool install docling==2.135.0
+# The constraints pin Linux x86_64 CPU builds; drop --torch-backend and
+# --constraints on other platforms.
+uv tool install docling==2.135.0 --torch-backend cpu \
+  --constraints .github/docling-constraints.txt
 uv pip install --no-deps pypandoc-binary==1.15
 mkdir -p "$HOME/.local/bin"
 ln -sf "$(uv run python -c 'import pypandoc; print(pypandoc.get_pandoc_path())')" \
