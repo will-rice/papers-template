@@ -83,6 +83,7 @@ def test_all_python_workflows_use_locked_dependencies() -> None:
 def test_nightly_provisions_pinned_conversion_and_formatting_tools() -> None:
     text = (WORKFLOWS / "nightly.yml").read_text(encoding="utf-8")
     assert "docling==2.135.0 --torch-backend cpu" in text
+    assert "--constraints .github/docling-constraints.txt" in text
     assert "docling-tools models download layout tableformer rapidocr" in text
     assert "DOCLING_ARTIFACTS_PATH=" in text
     assert "pypandoc-binary==1.15" in text
@@ -90,6 +91,21 @@ def test_nightly_provisions_pinned_conversion_and_formatting_tools() -> None:
     assert "pypandoc.get_pandoc_path()" in text
     assert '"$HOME/.local/bin" >> "$GITHUB_PATH"' in text
     assert text.index("docling==2.135.0") < text.index("nightly.sh")
+
+
+def test_docling_install_pins_every_dependency() -> None:
+    # uv resolves a tool's dependencies on every run; an unpinned one can
+    # break the nightly as soon as it publishes a release.
+    pins = [
+        line
+        for line in (WORKFLOWS.parent / "docling-constraints.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert "docling==2.135.0" in pins
+    assert len(pins) > 50
+    assert all(re.fullmatch(r"[A-Za-z0-9_.-]+==\S+", pin) for pin in pins)
 
 
 def test_nightly_has_non_overlapping_mutation_concurrency() -> None:
