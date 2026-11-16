@@ -53,6 +53,35 @@ def _clean_template_source(source: Path) -> str:
     return _git(source, "rev-parse", "HEAD")
 
 
+def test_template_links_a_shared_alphaxiv_folder(tmp_path: Path) -> None:
+    source = tmp_path / "template-source"
+    source_ref = _clean_template_source(source)
+    destination = tmp_path / "sample-papers"
+    folder_id = "019f564f-9833-7a27-b1ea-aec52fe9ef9f"
+    run_copy(
+        str(source),
+        destination,
+        data={
+            "project_name": "Sample Papers",
+            "project_slug": "sample-papers",
+            "topic_description": "sample topic",
+            "alphaxiv_folder_id": folder_id,
+        },
+        vcs_ref=source_ref,
+        defaults=True,
+        unsafe=True,
+    )
+
+    readme = (destination / "README.md").read_text(encoding="utf-8")
+    assert readme.startswith(
+        "# Sample Papers\n\n"
+        "Standalone paper discovery and conversion for sample topic.\n\n"
+        "Browse the collection on alphaXiv:\n"
+        f"https://www.alphaxiv.org/shared/folder/{folder_id}\n\n"
+        "<!-- papers-index:start -->"
+    )
+
+
 def test_template_renders_python_package(tmp_path: Path) -> None:
     source = tmp_path / "template-source"
     source_ref = _clean_template_source(source)
@@ -79,6 +108,9 @@ def test_template_renders_python_package(tmp_path: Path) -> None:
     assert (destination / "papers.schema.json").is_file()
     assert (destination / "topic_plugin.py").is_file()
     assert (destination / "llms.txt").read_text(encoding="utf-8").startswith("# ")
+    assert "alphaxiv.org/shared/folder" not in (destination / "README.md").read_text(
+        encoding="utf-8"
+    )
     assert (destination / ".github/workflows/ci.yml").is_file()
     assert (destination / ".github/workflows/nightly.yml").is_file()
     assert (destination / ".github/workflows/format-corpus.yml").is_file()
