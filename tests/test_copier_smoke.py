@@ -213,6 +213,70 @@ def test_template_renders_protected_state_files(tmp_path: Path) -> None:
     assert state_file.read_text() == "continuations: {}\nfailures: {}\n"
 
 
+def test_template_update_merges_template_edits_beside_generated_index(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "template-source"
+    _clean_template_source(source)
+    _git(source, "tag", "v1.0.0")
+    template_readme = source / "template" / "README.md.jinja"
+    template_readme.write_text(
+        template_readme.read_text(encoding="utf-8").replace(
+            "<!-- papers-index:start -->",
+            "A new template line.\n\n<!-- papers-index:start -->",
+        ),
+        encoding="utf-8",
+    )
+    _git(source, "commit", "--quiet", "-am", "edit beside the index")
+    _git(source, "tag", "v1.1.0")
+    destination = tmp_path / "sample-papers"
+    run_copy(
+        str(source),
+        destination,
+        data={
+            "project_name": "Sample Papers",
+            "project_slug": "sample-papers",
+            "topic_description": "sample topic",
+        },
+        vcs_ref="v1.0.0",
+        defaults=True,
+        unsafe=True,
+    )
+    readme = destination / "README.md"
+    rendered = readme.read_text(encoding="utf-8")
+    start = rendered.index("<!-- papers-index:start -->\n") + len(
+        "<!-- papers-index:start -->\n"
+    )
+    end = rendered.index("<!-- papers-index:end -->")
+    generated = "\n# Papers\n\nThe 1 most recent of 1 papers.\n\n"
+    readme.write_text(rendered[:start] + generated + rendered[end:], encoding="utf-8")
+    _git(destination, "init", "--quiet")
+    _git(destination, "config", "user.name", "Template Test")
+    _git(destination, "config", "user.email", "template@example.test")
+    _git(destination, "add", ".")
+    _git(destination, "commit", "--quiet", "-m", "generated repository")
+
+    environment = os.environ.copy()
+    environment["TEMPLATE_REF"] = "v1.1.0"
+    environment["PRE_COMMIT_HOME"] = str(tmp_path / "pre-commit-home")
+    # The update workflow installs Copier beside uv; this environment has it.
+    environment["PATH"] = (
+        f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
+    )
+    subprocess.run(
+        [str(destination / ".github" / "scripts" / "template-update.sh")],
+        cwd=destination,
+        env=environment,
+        check=True,
+    )
+
+    assert (
+        "A new template line.\n\n<!-- papers-index:start -->\n"
+        + generated
+        + "<!-- papers-index:end -->"
+    ) in readme.read_text(encoding="utf-8")
+
+
 def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:
     source = tmp_path / "template-source"
     source_ref = _clean_template_source(source)
