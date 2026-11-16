@@ -1,6 +1,11 @@
 # {{ project_name }}
 
 Standalone paper discovery and conversion for {{ topic_description }}.
+{%- if alphaxiv_folder_id %}
+
+Browse the collection on alphaXiv:
+https://www.alphaxiv.org/shared/folder/{{ alphaxiv_folder_id }}
+{%- endif %}
 
 <!-- papers-index:start -->
 # Papers
