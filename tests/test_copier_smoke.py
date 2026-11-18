@@ -213,7 +213,7 @@ def test_template_renders_protected_state_files(tmp_path: Path) -> None:
     assert state_file.read_text() == "continuations: {}\nfailures: {}\n"
 
 
-def test_template_update_merges_template_edits_beside_generated_index(
+def test_template_update_merges_template_edits_beside_generated_files(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "template-source"
@@ -227,7 +227,33 @@ def test_template_update_merges_template_edits_beside_generated_index(
         ),
         encoding="utf-8",
     )
-    _git(source, "commit", "--quiet", "-am", "edit beside the index")
+    # The release also adds a dependency, editing the lock where a repository's
+    # own dependencies change it.
+    template_pyproject = source / "template" / "pyproject.toml.jinja"
+    template_pyproject.write_text(
+        template_pyproject.read_text(encoding="utf-8").replace(
+            '  "httpx2>=2.5,<3",\n', '  "httpx2>=2.5,<3",\n  "idna>=3,<4",\n'
+        ),
+        encoding="utf-8",
+    )
+    template_lock = source / "template" / "uv.lock.jinja"
+    template_lock.write_text(
+        template_lock.read_text(encoding="utf-8")
+        .replace(
+            'source = { editable = "." }\ndependencies = [\n'
+            '    { name = "httpx" },\n    { name = "httpx2" },\n',
+            'source = { editable = "." }\ndependencies = [\n'
+            '    { name = "httpx" },\n    { name = "httpx2" },\n'
+            '    { name = "idna" },\n',
+        )
+        .replace(
+            '    { name = "httpx2", specifier = ">=2.5,<3" },\n',
+            '    { name = "httpx2", specifier = ">=2.5,<3" },\n'
+            '    { name = "idna", specifier = ">=3,<4" },\n',
+        ),
+        encoding="utf-8",
+    )
+    _git(source, "commit", "--quiet", "-am", "edit beside generated files")
     _git(source, "tag", "v1.1.0")
     destination = tmp_path / "sample-papers"
     run_copy(
@@ -250,6 +276,13 @@ def test_template_update_merges_template_edits_beside_generated_index(
     end = rendered.index("<!-- papers-index:end -->")
     generated = "\n# Papers\n\nThe 1 most recent of 1 papers.\n\n"
     readme.write_text(rendered[:start] + generated + rendered[end:], encoding="utf-8")
+    # A repository's own dependency rewrites part of uv.lock, as a topic
+    # plugin's embedding model does.
+    subprocess.run(
+        ["uv", "add", "--quiet", "--no-sync", "six>=1.16,<2"],
+        cwd=destination,
+        check=True,
+    )
     _git(destination, "init", "--quiet")
     _git(destination, "config", "user.name", "Template Test")
     _git(destination, "config", "user.email", "template@example.test")
@@ -275,6 +308,12 @@ def test_template_update_merges_template_edits_beside_generated_index(
         + generated
         + "<!-- papers-index:end -->"
     ) in readme.read_text(encoding="utf-8")
+    pyproject = (destination / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"idna>=3,<4"' in pyproject
+    assert '"six>=1.16,<2"' in pyproject
+    lock = (destination / "uv.lock").read_text(encoding="utf-8")
+    assert '{ name = "idna", specifier = ">=3,<4" }' in lock
+    assert '{ name = "six", specifier = ">=1.16,<2" }' in lock
 
 
 def test_generated_repository_passes_offline_suite(tmp_path: Path) -> None:
