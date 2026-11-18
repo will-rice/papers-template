@@ -29,10 +29,10 @@ _DEFAULT_CONVERSION_TIMEOUT = 900.0
 _PROCESS_SHUTDOWN_TIMEOUT = 2.0
 # A standard GitHub runner has 16 GB of memory. A converter that outgrows it
 # gets the runner shut down mid-batch, so the paper is never recorded as failed
-# and every run retries it; docling peaked at 16.6 GB on one 50-page PDF while
-# typical papers stay under 7 GB. Capping the converter's process tree fails
-# just that paper, leaving room for the pipeline itself.
-CONVERSION_MEMORY_LIMIT_BYTES = 12 * 1024**3
+# and every run retries it. Sampled every 0.1 s, docling's process tree peaked
+# at 10.5 GiB on the PDF that did this and at 5.2 GiB on a 158-page paper.
+# Capping the tree fails just the outlier, leaving room for the pipeline.
+CONVERSION_MEMORY_LIMIT_BYTES = 8 * 1024**3
 MEMORY_SAMPLE_SECONDS = 1.0
 _DOCLING_TOOL = "docling"
 _PANDOC_TOOL = "pandoc"
