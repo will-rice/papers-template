@@ -253,6 +253,17 @@ def test_template_update_merges_template_edits_beside_generated_files(
         ),
         encoding="utf-8",
     )
+    # The release also changes the update script, which Copier rewrites while
+    # the script is running.
+    template_script = source / "template" / ".github" / "scripts" / "template-update.sh"
+    template_script.write_text(
+        template_script.read_text(encoding="utf-8").replace(
+            "set -euo pipefail\n",
+            "set -euo pipefail\n# A new line that shifts every later byte.\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
     _git(source, "commit", "--quiet", "-am", "edit beside generated files")
     _git(source, "tag", "v1.1.0")
     destination = tmp_path / "sample-papers"
