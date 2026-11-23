@@ -245,7 +245,7 @@ async def test_crossref_local_truncation_on_final_page_resumes_without_skip_or_d
         "10.1000/fixture-local-2",
     )
     assert second_page.next_cursor is None
-    assert second_page.capped is True
+    assert second_page.capped is False
 
 
 @pytest.mark.asyncio

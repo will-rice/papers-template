@@ -70,13 +70,21 @@ class SemanticScholarAdapter:
                 permanent_errors=errors,
             )
 
+        following_offset = _next_offset(
+            current_offset=state["offset"],
+            payload_next=next_offset,
+            item_count=len(items),
+        )
+        if following_offset.isdecimal() and int(following_offset) >= _REACHABLE_RESULTS:
+            return FetchPage(
+                records=records,
+                next_cursor=None,
+                capped=total > _REACHABLE_RESULTS,
+                permanent_errors=errors,
+            )
         next_state: _CursorState = {
             "consumed": state["consumed"] + len(items),
-            "offset": _next_offset(
-                current_offset=state["offset"],
-                payload_next=next_offset,
-                item_count=len(items),
-            ),
+            "offset": following_offset,
             "page": state["page"] + 1,
         }
         next_cursor = _encode_cursor(next_state)

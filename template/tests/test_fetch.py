@@ -4,7 +4,9 @@ from datetime import date, datetime, time, timedelta, timezone
 
 import httpx
 import pytest
+from pydantic import TypeAdapter
 
+from papers_pipeline.adapters import build_adapters
 from papers_pipeline.adapters.arxiv import ArxivAdapter
 from papers_pipeline.adapters.base import Adapter, FetchPage, FetchWindow
 from papers_pipeline.adapters.dblp import DblpAdapter
@@ -716,6 +718,7 @@ async def test_resumed_fetch_gets_a_full_page_budget_every_run(
     adapter: Adapter,
     respond: Callable[[httpx.Request], httpx.Response],
 ) -> None:
+    name = TypeAdapter(AdapterName).validate_python(adapter.name)
     config = pipeline_config(
         adapter_config(name, lookback_days=7, max_pages=3, max_results=1000)
     )
@@ -742,3 +745,246 @@ async def test_resumed_fetch_gets_a_full_page_budget_every_run(
 
     assert requests_per_run == [3, 3, 3, 3]
     assert adapter.name in state.continuations
+
+
+@pytest.mark.asyncio
+async def test_outage_longer_than_lookback_is_fetched_from_the_last_success() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7))
+    last_success = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    next_run = datetime(2026, 1, 31, tzinfo=timezone.utc)
+    missed = source_record(
+        "arxiv", "missed", published=datetime(2026, 1, 6, tzinfo=timezone.utc)
+    )
+    adapter = RecordingAdapter("arxiv", pages=[page()])
+    factory, _, _ = client_factory(config.fetch)
+    first = await fetch_all(
+        config, PipelineState(), {"arxiv": adapter}, factory, last_success
+    )
+
+    adapter.pages.append(page(missed))
+    second = await fetch_all(config, first.state, {"arxiv": adapter}, factory, next_run)
+
+    assert adapter.windows[1] == FetchWindow(start=last_success, end=next_run)
+    assert adapter.windows[1].start <= missed.published <= adapter.windows[1].end
+    assert second.records == (missed,)
+    assert first.state.fetched_through == {"arxiv": last_success}
+    assert second.state.fetched_through == {"arxiv": next_run}
+
+
+@pytest.mark.asyncio
+async def test_recent_success_keeps_the_lookback_overlap() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7))
+    state = PipelineState(fetched_through={"arxiv": NOW - timedelta(days=1)})
+    adapter = RecordingAdapter("arxiv", pages=[page()])
+    factory, _, _ = client_factory(config.fetch)
+
+    await fetch_all(config, state, {"arxiv": adapter}, factory, NOW)
+
+    assert adapter.windows == [FetchWindow(start=NOW - timedelta(days=7), end=NOW)]
+
+
+@pytest.mark.asyncio
+async def test_catch_up_resumes_and_records_only_the_completed_window_end() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7, max_pages=1))
+    last_success = NOW - timedelta(days=60)
+    resumed_at = NOW + timedelta(days=30)
+    window = FetchWindow(start=last_success, end=NOW)
+    adapter = RecordingAdapter("arxiv", pages=[page(next_cursor="resume"), page()])
+    factory, _, _ = client_factory(config.fetch)
+
+    capped = await fetch_all(
+        config,
+        PipelineState(fetched_through={"arxiv": last_success}),
+        {"arxiv": adapter},
+        factory,
+        NOW,
+    )
+    finished = await fetch_all(
+        config, capped.state, {"arxiv": adapter}, factory, resumed_at
+    )
+    adapter.pages.append(page())
+    await fetch_all(config, finished.state, {"arxiv": adapter}, factory, resumed_at)
+
+    assert capped.state.fetched_through == {"arxiv": last_success}
+    assert adapter.windows[:2] == [window, window]
+    assert adapter.cursors[:2] == [None, "resume"]
+    # The papers published while the capped window was resumed are next.
+    assert finished.state.fetched_through == {"arxiv": NOW}
+    assert adapter.windows[2] == FetchWindow(start=NOW, end=resumed_at)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        RecordingAdapter(
+            "arxiv",
+            pages=[FetchPage(records=(), next_cursor=None, capped=True)],
+        ),
+        RecordingAdapter(
+            "arxiv", failure=SourceUnavailableError("request retries exhausted")
+        ),
+    ],
+    ids=["capped_without_cursor", "unavailable"],
+)
+async def test_incomplete_forward_window_keeps_the_last_success(
+    adapter: RecordingAdapter,
+) -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7))
+    last_success = NOW - timedelta(days=30)
+    factory, _, _ = client_factory(config.fetch)
+
+    result = await fetch_all(
+        config,
+        PipelineState(fetched_through={"arxiv": last_success}),
+        {"arxiv": adapter},
+        factory,
+        NOW,
+    )
+
+    assert result.state.fetched_through == {"arxiv": last_success}
+
+
+@pytest.mark.asyncio
+async def test_failed_backfill_does_not_record_the_discarded_forward_window() -> None:
+    config = backfill_config(date(2000, 1, 1))
+    last_success = NOW - timedelta(days=30)
+
+    @dataclass
+    class ForwardThenFailing(RecordingAdapter):
+        async def fetch(
+            self,
+            window: FetchWindow,
+            cursor: str | None,
+            client: RequestClient,
+            config: AdapterConfig,
+        ) -> FetchPage:
+            if self.windows:
+                raise SourceUnavailableError("request retries exhausted")
+            self.windows.append(window)
+            return page(source_record("arxiv", "discarded"))
+
+    factory, _, _ = client_factory(config.fetch)
+
+    result = await fetch_all(
+        config,
+        PipelineState(fetched_through={"arxiv": last_success}),
+        {"arxiv": ForwardThenFailing("arxiv")},
+        factory,
+        NOW,
+    )
+
+    assert result.records == ()
+    assert result.state.fetched_through == {"arxiv": last_success}
+
+
+def papers_with_code_walk(request: httpx.Request) -> httpx.Response:
+    number = int(request.url.params.get("page", "1"))
+    following = (
+        f"https://paperswithcode.com/api/v1/papers/?page={number + 1}"
+        if number < 5
+        else None
+    )
+    return httpx.Response(200, json={"results": [{}], "next": following})
+
+
+def crossref_walk(request: httpx.Request) -> httpx.Response:
+    cursor = request.url.params["cursor"]
+    number = 1 if cursor == "*" else int(cursor)
+    message: dict[str, object] = {"items": [{}]}
+    if number < 5:
+        message["next-cursor"] = str(number + 1)
+    return httpx.Response(200, json={"message": message})
+
+
+def biorxiv_walk(request: httpx.Request) -> httpx.Response:
+    offset = int(request.url.path.rsplit("/", 1)[-1])
+    return httpx.Response(200, json={"collection": [{}] if offset < 5 else []})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "filters", "respond"),
+    [
+        ("papers_with_code", {}, papers_with_code_walk),
+        ("biorxiv_crossref", {"provider": "crossref"}, crossref_walk),
+        ("biorxiv_crossref", {"provider": "biorxiv"}, biorxiv_walk),
+    ],
+    ids=["papers_with_code", "crossref", "biorxiv"],
+)
+async def test_resumed_catch_up_completes_and_records_success(
+    name: AdapterName,
+    filters: dict[str, str],
+    respond: Callable[[httpx.Request], httpx.Response],
+) -> None:
+    config = pipeline_config(
+        adapter_config(
+            name, lookback_days=7, page_size=1, max_pages=2, max_results=100
+        ).model_copy(update={"filters": filters})
+    )
+    adapter = build_adapters(config, {})[name]
+    state = PipelineState()
+    requests_per_run: list[int] = []
+    for _ in range(3):
+        requests: list[httpx.URL] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            requests.append(request.url)
+            return respond(request)
+
+        result = await fetch_all(
+            config,
+            state,
+            {name: adapter},
+            lambda deadline: RequestClient(
+                config.fetch, deadline, transport=httpx.MockTransport(handle)
+            ),
+            NOW,
+        )
+        state = result.state
+        requests_per_run.append(len(requests))
+
+    assert requests_per_run[:2] == [2, 2]
+    assert state.continuations == {}
+    assert state.fetched_through == {name: NOW}
+
+
+@pytest.mark.asyncio
+async def test_unreachable_semantic_scholar_results_keep_the_last_success() -> None:
+    config = pipeline_config(
+        adapter_config(
+            "semantic_scholar",
+            lookback_days=7,
+            page_size=100,
+            max_pages=100,
+            max_results=10000,
+        )
+    )
+    last_success = NOW - timedelta(days=60)
+    offsets: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        offsets.append(offset)
+        if offset >= 1000:
+            return httpx.Response(400, request=request, text="offset out of range")
+        return httpx.Response(
+            200, json={"total": 5000, "next": offset + 100, "data": [{}] * 100}
+        )
+
+    adapter = SemanticScholarAdapter("key")
+    result = await fetch_all(
+        config,
+        PipelineState(fetched_through={"arxiv": NOW, adapter.name: last_success}),
+        {adapter.name: adapter},
+        lambda deadline: RequestClient(
+            config.fetch, deadline, transport=httpx.MockTransport(handle)
+        ),
+        NOW,
+    )
+
+    assert offsets == list(range(0, 1000, 100))
+    assert result.stats[0].capped is True
+    assert result.stats[0].complete is False
+    assert result.state.continuations == {}
+    assert result.state.fetched_through[adapter.name] == last_success

@@ -104,6 +104,22 @@ def test_legacy_cursor_is_discarded_instead_of_reused_with_a_new_window(
     assert load_state(path) == PipelineState()
 
 
+def test_state_without_fetched_through_loads_and_round_trips_it(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".papers-state.yml"
+    path.write_text("continuations: {}\nfailures: {}\n", encoding="utf-8")
+    fetched_at = datetime(2026, 9, 23, 2, 0, tzinfo=timezone.utc)
+
+    state = load_state(path)
+    save_state(
+        path, state.model_copy(update={"fetched_through": {"arxiv": fetched_at}})
+    )
+
+    assert state == PipelineState()
+    assert load_state(path).fetched_through == {"arxiv": fetched_at}
+
+
 def test_continuation_window_requires_utc() -> None:
     with pytest.raises(ValueError, match="window_start must use UTC"):
         SourceContinuation(

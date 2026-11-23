@@ -323,6 +323,8 @@ async def test_state_save_failure_restores_batch_outputs_and_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = make_paths(tmp_path)
+    state_before = f"fetched_through:\n  arxiv: '{NOW.isoformat()}'\n".encode()
+    paths.state.write_bytes(state_before)
     git = RecordingGit()
 
     def fail_save(path: Path, _state: object) -> None:
@@ -341,7 +343,7 @@ async def test_state_save_failure_restores_batch_outputs_and_index(
             ),
         )
 
-    assert not paths.state.exists()
+    assert paths.state.read_bytes() == state_before
     assert (paths.root / "README.md").read_bytes() == INITIAL_README
     assert list((paths.root / "papers").glob("*")) == []
     assert git.messages == ["chore: update paper inventory"]

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 InputFormat = Literal["html", "latex", "pdf"]
 
@@ -77,6 +77,7 @@ class PipelineState(BaseModel):
 
     continuations: dict[str, SourceContinuation] = Field(default_factory=dict)
     backfill: dict[str, BackfillProgress] = Field(default_factory=dict)
+    fetched_through: dict[str, AwareDatetime] = Field(default_factory=dict)
     failures: dict[str, list[FailureAttempt]] = Field(default_factory=dict)
 
     @model_validator(mode="before")

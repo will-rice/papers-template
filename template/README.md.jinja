@@ -128,9 +128,12 @@ The nightly command derives backlog from `papers.csv` versus files under
 `papers/`. `.papers-state.yml` stores each source's opaque cursor together with
 the exact UTC window start/end and consecutive failure attempts. A capped run
 reuses that window until enumeration completes; only the following run creates
-a fresh lookback window. Legacy cursor-only state is discarded rather than
-being resumed against a different window. Count and cost budgets select
-deterministic batches. Each run first converts every pending paper that pandoc
+a fresh window. It also stores the end of each source's last fully fetched
+window; a fresh window starts at that time or `lookback_days` ago, whichever is
+earlier, so an outage of any length is caught up. Capped, failed, or
+unresumable fetches leave it unchanged. Legacy cursor-only state is discarded
+rather than being resumed against a different window. Count and cost budgets
+select deterministic batches. Each run first converts every pending paper that pandoc
 can handle, setting aside those that need docling, then spends its remaining
 batches on docling; a batch counts toward `max_batches_per_run` only when it
 converted or failed a paper.

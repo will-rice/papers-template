@@ -96,6 +96,7 @@ async def fetch_all(
     events: list[str] = []
     continuations = dict(state.continuations)
     backfill = dict(state.backfill)
+    fetched_through = dict(state.fetched_through)
 
     for adapter_index, adapter_config in enumerate(config.adapters):
         if not adapter_config.enabled:
@@ -103,11 +104,15 @@ async def fetch_all(
 
         adapter = adapters[adapter_config.name]
         continuation = continuations.get(adapter.name)
+        lookback_start = now - timedelta(days=adapter_config.lookback_days)
         window = FetchWindow(
             start=(
                 continuation.window_start
                 if continuation
-                else now - timedelta(days=adapter_config.lookback_days)
+                else min(
+                    lookback_start,
+                    fetched_through.get(adapter.name, lookback_start),
+                )
             ),
             end=continuation.window_end if continuation else now,
         )
@@ -160,6 +165,7 @@ async def fetch_all(
                 events.append(f"{adapter.name}: cap reached; continuation persisted")
         elif forward.complete:
             continuations.pop(adapter.name, None)
+            fetched_through[adapter.name] = window.end
             if starting_cursor is not None:
                 events.append(f"{adapter.name}: fetch complete; cursor cleared")
             else:
@@ -190,7 +196,11 @@ async def fetch_all(
     return FetchResult(
         records=tuple(records),
         state=state.model_copy(
-            update={"continuations": continuations, "backfill": backfill}
+            update={
+                "continuations": continuations,
+                "backfill": backfill,
+                "fetched_through": fetched_through,
+            }
         ),
         stats=tuple(stats),
         events=tuple(events),
