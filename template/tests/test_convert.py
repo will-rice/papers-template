@@ -36,6 +36,7 @@ from papers_pipeline.convert import (
     DownloadingMaterializer,
     convert_batch,
     has_real_body,
+    is_cleaner_conversion,
     localize_inline_figures,
     localize_pdf_figures,
     requeue_outdated_conversions,
@@ -1535,6 +1536,10 @@ if "garbled" in Path(source).name and tool == "docling":
         body = "# converted\\n\\nBody \\ufffd\\ufffd text.\\n"
     elif "crash" in Path(source).name:
         os.kill(os.getpid(), signal.SIGSEGV)
+    elif "empty" in Path(source).name:
+        body = ""
+    elif "truncated" in Path(source).name:
+        body = "# converted\\n\\nBody\\n"
 output.write_text(body, encoding="utf-8")
 """
 
@@ -2201,6 +2206,8 @@ async def test_output_with_no_body_fails_the_paper(tmp_path: Path) -> None:
     [
         ("doi:garbled", "Body text."),
         ("doi:garbled-crash", "Body \ufffd\ufffd text."),
+        ("doi:garbled-empty", "Body \ufffd\ufffd text."),
+        ("doi:garbled-truncated", "Body \ufffd\ufffd text."),
     ],
 )
 async def test_garbled_pdf_output_is_converted_again_with_pdfium(
@@ -2214,6 +2221,24 @@ async def test_garbled_pdf_output_is_converted_again_with_pdfium(
     assert kept in expected_markdown(tmp_path / "work", target).read_text(
         encoding="utf-8"
     )
+
+
+@pytest.mark.parametrize(
+    ("retry", "first", "expected"),
+    [
+        ("Clean speech model text.", "Clean sp\ufffd\ufffdch model text.", True),
+        ("", "Clean sp\ufffd\ufffdch model text.", False),
+        ("<!-- image -->", "Clean sp\ufffd\ufffdch model text.", False),
+        ("Clean", "Clean sp\ufffd\ufffdch model text.", False),
+        (
+            "Clean m icrophone sp eech model text.",
+            "Clean micr\ufffdphone model text speech.",
+            False,
+        ),
+    ],
+)
+def test_is_cleaner_conversion(retry: str, first: str, expected: bool) -> None:
+    assert is_cleaner_conversion(retry, first) is expected
 
 
 def test_requeue_outdated_conversions_removes_garbled_papers(tmp_path: Path) -> None:
