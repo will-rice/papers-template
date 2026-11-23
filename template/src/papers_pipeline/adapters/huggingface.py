@@ -14,7 +14,7 @@ from papers_pipeline.models import SourceRecord
 
 class _CursorState(TypedDict):
     date: str | None
-    page: int
+    offset: int
     source_consumed: int
 
 
@@ -39,11 +39,15 @@ class HuggingFaceAdapter:
             if state["date"] is not None
             else (window.end - timedelta(days=1)).date()
         )
+        # The API serves items p * limit onward, and the limit shrinks with the
+        # run's budget, so the cursor stores an item offset and each request
+        # derives its page from the limit it is about to send.
+        page_number, skipped = divmod(state["offset"], config.page_size)
         text = await client.get_text(
             "https://huggingface.co/api/daily_papers",
             {
                 "date": current_date.isoformat(),
-                "p": str(state["page"]),
+                "p": str(page_number),
                 "limit": str(config.page_size),
             },
             {},
@@ -59,14 +63,15 @@ class HuggingFaceAdapter:
                 "invalid JSON from huggingface: expected list payload"
             )
 
-        records, errors = collect_records(payload, self._record)
-        if not payload:
+        unread = payload[skipped:]
+        records, errors = collect_records(unread, self._record)
+        if not unread:
             previous_date = current_date - timedelta(days=1)
             next_cursor = (
                 _encode_cursor(
                     {
                         "date": previous_date.isoformat(),
-                        "page": 0,
+                        "offset": 0,
                         "source_consumed": state["source_consumed"],
                     }
                 )
@@ -82,11 +87,11 @@ class HuggingFaceAdapter:
 
         next_state: _CursorState = {
             "date": current_date.isoformat(),
-            "page": state["page"] + 1,
-            "source_consumed": state["source_consumed"] + len(payload),
+            "offset": state["offset"] + len(unread),
+            "source_consumed": state["source_consumed"] + len(unread),
         }
         next_cursor = _encode_cursor(next_state)
-        capped = len(payload) >= config.max_results
+        capped = len(unread) >= config.max_results
         return FetchPage(
             records=records,
             next_cursor=next_cursor,
@@ -129,7 +134,7 @@ def _encode_cursor(state: Mapping[str, object]) -> str:
 
 def _decode_cursor(cursor: str | None) -> _CursorState:
     if cursor is None:
-        return {"date": None, "page": 0, "source_consumed": 0}
+        return {"date": None, "offset": 0, "source_consumed": 0}
     padding = "=" * (-len(cursor) % 4)
     try:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
@@ -141,13 +146,13 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
     consumed = data.get("source_consumed", data.get("consumed", data.get("emitted")))
-    page = data.get("page")
+    position = data.get("offset", data.get("page"))
     raw_date = data.get("date")
     if (
         not isinstance(consumed, int)
         or consumed < 0
-        or not isinstance(page, int)
-        or page < 0
+        or not isinstance(position, int)
+        or position < 0
     ):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
     if raw_date is not None:
@@ -161,7 +166,10 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
             raise InfrastructureError(
                 f"invalid huggingface continuation cursor: {cursor}"
             ) from error
-    return {"date": raw_date, "page": page, "source_consumed": consumed}
+    # A saved "page" does not say which limit wrote it, so that day is read again
+    # from its start; repeated papers merge into their existing rows.
+    offset = position if "offset" in data else 0
+    return {"date": raw_date, "offset": offset, "source_consumed": consumed}
 
 
 def _required_identifier(paper: dict[str, object]) -> str:

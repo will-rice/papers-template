@@ -420,20 +420,19 @@ def huggingface_invalid_json_client(
 def huggingface_out_of_window_only_client(
     fixture_transport: FixtureTransport,
     fetch_config: FetchConfig,
-    huggingface_config: AdapterConfig,
 ) -> RequestClient:
     transport = fixture_transport(
         {
             _huggingface_route(
                 page=0,
-                page_size=huggingface_config.page_size,
+                page_size=1,
                 date="2024-01-07",
             ): {
                 "fixture": "adapters/huggingface/page-out-of-window-only.json",
             },
             _huggingface_route(
                 page=1,
-                page_size=huggingface_config.page_size,
+                page_size=1,
                 date="2024-01-07",
             ): {
                 "fixture": "adapters/huggingface/page-2.json",

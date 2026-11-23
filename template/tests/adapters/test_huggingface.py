@@ -165,6 +165,7 @@ async def test_huggingface_keeps_papers_listed_long_after_publication(
     huggingface_config: AdapterConfig,
 ) -> None:
     adapter = HuggingFaceAdapter()
+    one_per_page = huggingface_config.model_copy(update={"page_size": 1})
     first_page = await adapter.fetch(
         window=FetchWindow(
             start=datetime(2024, 1, 1, tzinfo=timezone.utc),
@@ -172,7 +173,7 @@ async def test_huggingface_keeps_papers_listed_long_after_publication(
         ),
         cursor=None,
         client=huggingface_out_of_window_only_client,
-        config=huggingface_config,
+        config=one_per_page,
     )
 
     second_page = await adapter.fetch(
@@ -182,7 +183,7 @@ async def test_huggingface_keeps_papers_listed_long_after_publication(
         ),
         cursor=first_page.next_cursor,
         client=huggingface_out_of_window_only_client,
-        config=huggingface_config,
+        config=one_per_page,
     )
 
     assert tuple(record.source_id for record in first_page.records) == ("2312.12345",)
@@ -278,3 +279,40 @@ async def test_huggingface_enumerates_each_utc_date_and_resumes_mid_range(
     page = await adapter.fetch(window, page.next_cursor, client, huggingface_config)
     assert page.records == ()
     assert page.next_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_huggingface_saved_page_cursor_rereads_its_day(
+    fixture_transport: FixtureTransport,
+    fetch_config: FetchConfig,
+    huggingface_config: AdapterConfig,
+) -> None:
+    # Saved by an unfinished backfill: {"date":"2025-06-11","page":1,...}.
+    saved_cursor = (
+        "eyJkYXRlIjoiMjAyNS0wNi0xMSIsInBhZ2UiOjEsInNvdXJjZV9jb25zdW1lZCI6Mjc3OH0"
+    )
+    transport = fixture_transport(
+        {
+            "https://huggingface.co/api/daily_papers?date=2025-06-11&p=0&limit=2": {
+                "fixture": "adapters/huggingface/page.json"
+            },
+        }
+    )
+    client = RequestClient(
+        fetch_config,
+        Deadline.start(fetch_config.total_deadline_seconds),
+        transport=transport,
+    )
+    window = FetchWindow(
+        start=datetime(2024, 11, 8, tzinfo=timezone.utc),
+        end=datetime(2025, 11, 8, tzinfo=timezone.utc),
+    )
+
+    page = await HuggingFaceAdapter().fetch(
+        window, saved_cursor, client, huggingface_config
+    )
+
+    assert tuple(record.source_id for record in page.records) == (
+        "2401.00001",
+        "2401.00003",
+    )

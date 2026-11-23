@@ -11,6 +11,7 @@ from papers_pipeline.adapters import build_adapters
 from papers_pipeline.adapters.arxiv import ArxivAdapter
 from papers_pipeline.adapters.base import Adapter, FetchPage, FetchWindow
 from papers_pipeline.adapters.dblp import DblpAdapter
+from papers_pipeline.adapters.huggingface import HuggingFaceAdapter
 from papers_pipeline.adapters.semantic_scholar import SemanticScholarAdapter
 from papers_pipeline.config import (
     AdapterConfig,
@@ -1378,3 +1379,56 @@ async def test_recent_success_makes_no_state_change_until_it_leaves_the_lookback
     assert quiet.state == state
     assert adapter.windows[1] == FetchWindow(start=recorded, end=later)
     assert moved.state.fetched_through == {"arxiv": later}
+
+
+def daily_paper(number: int) -> dict[str, object]:
+    return {
+        "paper": {
+            "id": f"2609.{number:05d}",
+            "title": f"Paper {number}",
+            "summary": "Abstract.",
+            "publishedAt": "2026-09-22T00:00:00.000Z",
+            "authors": [{"name": "A. Author"}],
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_huggingface_budget_stop_mid_day_loses_no_paper_next_run() -> None:
+    day = [daily_paper(number) for number in range(21)]
+    responses = {
+        ("0", "19"): day[:19],
+        ("0", "20"): day[:20],
+        ("1", "20"): day[20:],
+        ("2", "20"): [],
+    }
+
+    def replay(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        assert params["date"] == "2026-09-22"
+        return httpx.Response(
+            200, json=responses[(params["p"], params["limit"])], request=request
+        )
+
+    def build_client(deadline: Deadline) -> RequestClient:
+        return RequestClient(
+            short_run.fetch, deadline, transport=httpx.MockTransport(replay)
+        )
+
+    short_run = pipeline_config(
+        adapter_config("huggingface", lookback_days=1, page_size=20, max_results=19)
+    )
+    full_run = pipeline_config(
+        adapter_config("huggingface", lookback_days=1, page_size=20, max_results=100)
+    )
+    adapters: dict[str, Adapter] = {"huggingface": HuggingFaceAdapter()}
+
+    first = await fetch_all(short_run, PipelineState(), adapters, build_client, NOW)
+    second = await fetch_all(full_run, first.state, adapters, build_client, NOW)
+
+    assert len(first.records) == 19
+    assert "huggingface" in first.state.continuations
+    assert "huggingface" not in second.state.continuations
+    assert sorted(record.source_id for record in first.records + second.records) == [
+        f"2609.{number:05d}" for number in range(21)
+    ]
