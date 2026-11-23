@@ -319,7 +319,7 @@ async def test_semantic_scholar_reports_windows_beyond_reachable_results(
             "https://api.semanticscholar.org/graph/v1/paper/search",
             params={
                 "query": "speech recognition",
-                "publicationDateOrYear": "2024-01-01:2024-01-08",
+                "publicationDateOrYear": "2024-01-01:2024-01-01",
                 "offset": "0",
                 "limit": "1",
                 "fields": (
@@ -341,7 +341,7 @@ async def test_semantic_scholar_reports_windows_beyond_reachable_results(
         page = await SemanticScholarAdapter(api_key="secret").fetch(
             window=FetchWindow(
                 start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-                end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 1, 23, tzinfo=timezone.utc),
             ),
             cursor=None,
             client=client,
@@ -349,6 +349,6 @@ async def test_semantic_scholar_reports_windows_beyond_reachable_results(
         )
 
     assert page.permanent_errors[-1] == (
-        "semantic_scholar window 2024-01-01..2024-01-08 matches 5000 papers; "
-        "only the first 1000 are reachable, so shorten the window"
+        "semantic_scholar window 2024-01-01..2024-01-01 matches 5000 papers; "
+        "only the first 1000 are reachable, so the rest of that day is skipped"
     )
