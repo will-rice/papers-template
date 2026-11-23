@@ -169,7 +169,12 @@ async def fetch_all(
                     events.append(f"{adapter.name}: fetch complete")
             elif forward.capped:
                 events.append(f"{adapter.name}: cap reached")
-        if forward.covered_through is not None:
+        recorded = fetched_through.get(adapter.name)
+        # A value inside the lookback does not change the next window and stays
+        # a safe lower bound, so rewriting it would only add a state commit.
+        if forward.covered_through is not None and (
+            recorded is None or recorded < min(lookback_start, forward.covered_through)
+        ):
             fetched_through[adapter.name] = forward.covered_through
 
         source_records = forward.records

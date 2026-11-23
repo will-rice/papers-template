@@ -1207,3 +1207,22 @@ async def test_backfill_outage_keeps_completed_history_pages() -> None:
         window_start=adapter.windows[1].start,
         window_end=adapter.windows[1].end,
     )
+
+
+@pytest.mark.asyncio
+async def test_recent_success_makes_no_state_change_until_it_leaves_the_lookback() -> (
+    None
+):
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7))
+    recorded = NOW - timedelta(days=6)
+    state = PipelineState(fetched_through={"arxiv": recorded})
+    adapter = RecordingAdapter("arxiv", pages=[page(), page()])
+    factory, _, _ = client_factory(config.fetch)
+
+    quiet = await fetch_all(config, state, {"arxiv": adapter}, factory, NOW)
+    later = NOW + timedelta(days=2)
+    moved = await fetch_all(config, quiet.state, {"arxiv": adapter}, factory, later)
+
+    assert quiet.state == state
+    assert adapter.windows[1] == FetchWindow(start=recorded, end=later)
+    assert moved.state.fetched_through == {"arxiv": later}
