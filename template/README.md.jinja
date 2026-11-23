@@ -43,7 +43,8 @@ docling, with OCR on so scanned papers work and formula recognition off because
 it takes over a minute per equation on a CPU: display equations in those papers
 appear as `<!-- formula-not-decoded -->`. Run
 `papers-pipeline requeue-outdated` to delete conversions made before figures
-and equations were handled this way; the next nightly runs reconvert them.
+and equations were handled this way, and any with no body text (empty, only
+headings, or only a PDF include); the next nightly runs reconvert them.
 
 ## Configuration
 

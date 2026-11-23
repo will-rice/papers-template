@@ -35,6 +35,7 @@ from papers_pipeline.convert import (
     CommandRunner,
     DownloadingMaterializer,
     convert_batch,
+    has_real_body,
     localize_inline_figures,
     localize_pdf_figures,
     requeue_outdated_conversions,
@@ -1422,7 +1423,7 @@ async def test_docling_output_is_moved_from_its_output_directory(
     output = expected_markdown(tmp_path, target)
     assert result.succeeded[0].output == output
     assert output.read_text(encoding="utf-8") == with_front_matter(
-        target, "# converted .pdf\n"
+        target, "# converted .pdf\n\nBody text.\n"
     )
     assert not any((tmp_path / ".convert-batch").glob("**/*.md"))
 
@@ -1528,7 +1529,8 @@ if tool == "docling":
     output = Path(args[args.index("--output") + 1]) / f"{Path(source).stem}.md"
 else:
     output = Path(next(a for a in args if a.startswith("--output=")).split("=", 1)[1])
-output.write_text("# converted\\n", encoding="utf-8")
+body = "## Abstract\\n" if "stubhtml" in Path(source).name and source.endswith(".html") else "# converted\\n\\nBody text.\\n"
+output.write_text(body, encoding="utf-8")
 """
 
 
@@ -1756,7 +1758,7 @@ def _write_converter_output(argv: Sequence[str], input_path: Path) -> None:
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        f"# converted {input_path.suffix}\n",
+        f"# converted {input_path.suffix}\n\nBody text.\n",
         encoding="utf-8",
     )
 
@@ -1942,6 +1944,7 @@ async def _convert_arxiv_html_failure(
                 target.input_url: fixture_for(target),
                 ARXIV_HTML_URL: FIXTURES / "arxiv_figures.html",
             },
+            behaviors={AR5IV_HTML_URL: "paper_error"},
             downloads={"https://arxiv.org/html/2401.12345/x1.png": png(8, 8)},
         ),
         NOW,
@@ -1950,7 +1953,7 @@ async def _convert_arxiv_html_failure(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["badhtml", "corrupthtml"])
+@pytest.mark.parametrize("failure", ["badhtml", "corrupthtml", "stubhtml"])
 async def test_arxiv_html_conversion_failure_falls_through_to_the_pdf(
     tmp_path: Path, failure: str
 ) -> None:
@@ -2152,6 +2155,55 @@ def test_docling_figures_move_next_to_the_paper_and_are_relinked(
         "![Image](paper.figures/figure-1.webp)\n\ntext\n\n\n"
     )
     assert sorted(path.name for path in figures.iterdir()) == ["figure-1.webp"]
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("", False),
+        ("---\nidentifier: a\ntitle: Real title\n---\n\n", False),
+        ("---\nidentifier: a\n---\n\n## Abstract\n", False),
+        ("See pages 1-last of [double.pdf](https://double.pdf)\n", False),
+        ("## Paper\n\nSee pages - of [gan.pdf](https://gan.pdf)\n", False),
+        ("## Abstract\n\nA two sentence note. It is short.\n", True),
+        ("See pages 3 of the appendix for the proof.\n", True),
+        ("See pages 1-2 of [a.pdf](https://a.pdf)\n\nReal text.\n", True),
+    ],
+)
+def test_has_real_body(markdown: str, expected: bool) -> None:
+    assert has_real_body(markdown) is expected
+
+
+@pytest.mark.asyncio
+async def test_output_with_no_body_fails_the_paper(tmp_path: Path) -> None:
+    stub = paper("doi:stubhtml", input_format="html")
+
+    result = await _convert_with_crashes(tmp_path, [stub])
+
+    assert [item.paper for item in result.failed] == [stub]
+    assert "no body text" in result.state.failures[stub.identifier][0].error
+    assert not expected_markdown(tmp_path / "work", stub).exists()
+
+
+def test_requeue_outdated_conversions_removes_bodyless_papers(tmp_path: Path) -> None:
+    empty = paper("arxiv:1", input_format="html")
+    wrapper = paper("arxiv:2", input_format="html")
+    short = paper("arxiv:3", input_format="html")
+    for item, body in [
+        (empty, with_front_matter(empty, "## Abstract\n")),
+        (wrapper, "See pages 1-last of [x.pdf](https://x.pdf)\n"),
+        (short, with_front_matter(short, "## Abstract\n\nA short paper.\n")),
+    ]:
+        expected_markdown(tmp_path, item).parent.mkdir(parents=True, exist_ok=True)
+        expected_markdown(tmp_path, item).write_text(body, encoding="utf-8")
+
+    removed = requeue_outdated_conversions(tmp_path, [empty, wrapper, short])
+
+    assert removed == [
+        expected_markdown(tmp_path, empty),
+        expected_markdown(tmp_path, wrapper),
+    ]
+    assert infer_backlog([empty, wrapper, short], tmp_path).pending == (empty, wrapper)
 
 
 def test_requeue_outdated_conversions_removes_only_outdated_papers(

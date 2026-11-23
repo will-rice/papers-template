@@ -28,7 +28,7 @@ from papers_pipeline.errors import (
     PaperError,
     RateLimitedError,
 )
-from papers_pipeline.front_matter import with_front_matter
+from papers_pipeline.front_matter import with_front_matter, without_front_matter
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
 from papers_pipeline.remote import RemoteDownloader
 
@@ -99,6 +99,12 @@ _CRASH_OUTPUT_CHARS = 2000
 # Known-good inputs that show whether a converter still works after a crash.
 _PROBE_PDF = Path(__file__).with_name("conversion_probe.pdf")
 _PROBE_HTML = "<p>Conversion probe</p>"
+# Lines that carry no paper text: headings, and the note LaTeXML leaves for a
+# paper that only includes a PDF ("See pages 1-last of [x.pdf](https://x.pdf)").
+_NON_BODY_LINE = re.compile(
+    r"^(?:#{1,6}\s.*|See pages [^\n]*? of \[[^\]\n]*\.pdf\]\([^)\n]*\))\s*$",
+    re.MULTILINE,
+)
 
 
 class CommandRunner:
@@ -519,6 +525,8 @@ async def convert_batch(
             localize_inline_figures(
                 staged_output, staged_output.with_suffix(".figures")
             )
+            if not has_real_body(staged_output.read_text(encoding="utf-8")):
+                continue
             return True
         return False
 
@@ -610,6 +618,8 @@ async def convert_batch(
                 raise InfrastructureError(
                     f"converter reported success without output: {paper.identifier}"
                 )
+            if not has_real_body(staged_output.read_text(encoding="utf-8")):
+                raise PaperError(f"conversion has no body text: {paper.identifier}")
             return _PreparedConversion(
                 paper=paper, staged_output=staged_output, error=None, tool=tool
             )
@@ -828,8 +838,24 @@ _OUTDATED_CONVERSION = (
 )
 
 
+def has_real_body(markdown: str) -> bool:
+    """Whether converted markdown holds any text beyond headings and PDF stubs.
+
+    Length is deliberately not a criterion: short papers are legitimate.
+
+    Args:
+        markdown: Converted paper, with or without front matter.
+
+    Returns:
+        False for empty output, headings alone (such as a lone "## Abstract"),
+        or a LaTeXML article that only wraps a PDF include.
+    """
+    body = _NON_BODY_LINE.sub("", without_front_matter(markdown))
+    return re.search(r"\w", body) is not None
+
+
 def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Path]:
-    """Delete outdated conversions so the next nightly run redoes them.
+    """Delete outdated or bodyless conversions so the next nightly redoes them.
 
     Args:
         root: Repository root.
@@ -844,7 +870,9 @@ def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Pa
         if not markdown.exists():
             continue
         text = markdown.read_text(encoding="utf-8")
-        if any(pattern.search(text) for pattern in _OUTDATED_CONVERSION):
+        if not has_real_body(text) or any(
+            pattern.search(text) for pattern in _OUTDATED_CONVERSION
+        ):
             markdown.unlink()
             shutil.rmtree(expected_figures(root, paper), ignore_errors=True)
             removed.append(markdown)
