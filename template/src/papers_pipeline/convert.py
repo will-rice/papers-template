@@ -22,7 +22,12 @@ from PIL import Image
 
 from papers_pipeline.batching import Batch, expected_figures, expected_markdown
 from papers_pipeline.config import ConcurrencyConfig
-from papers_pipeline.errors import InfrastructureError, PaperError, RateLimitedError
+from papers_pipeline.errors import (
+    ConverterCrashError,
+    InfrastructureError,
+    PaperError,
+    RateLimitedError,
+)
 from papers_pipeline.front_matter import with_front_matter
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
 from papers_pipeline.remote import RemoteDownloader
@@ -87,6 +92,21 @@ _DOCUMENT_FAILURE_PATTERNS = (
     ),
     re.compile(r"\bnot\s+a\s+(?:valid\s+)?pdf\b", re.IGNORECASE),
 )
+# Output naming the machine rather than the document. These abort the run, so
+# no paper takes a strike for them.
+_ENVIRONMENT_FAILURE_PATTERN = re.compile(
+    r"\bout of memory\b|\bno space left on device\b"
+    r"|\b(?:failed to initialize|error loading) model\b|\bnot writable\b"
+    r"|\bshared (?:library|object)\b",
+    re.IGNORECASE,
+)
+# POSIX shell exits for a command that cannot run or does not exist.
+_TOOL_UNAVAILABLE_EXITS = {126, 127}
+# Crash output is saved in the state file and fixme markers.
+_CRASH_OUTPUT_CHARS = 2000
+# Known-good inputs that show whether a converter still works after a crash.
+_PROBE_PDF = Path(__file__).with_name("conversion_probe.pdf")
+_PROBE_HTML = "<p>Conversion probe</p>"
 
 
 class CommandRunner:
@@ -181,8 +201,16 @@ class CommandRunner:
             )
             if _is_document_failure(completed.returncode, output):
                 raise PaperError(message) from process_error
-            raise InfrastructureError(
-                f"conversion infrastructure failure: {message}"
+            if (
+                completed.returncode in _TOOL_UNAVAILABLE_EXITS
+                or _ENVIRONMENT_FAILURE_PATTERN.search(output)
+            ):
+                raise InfrastructureError(
+                    f"conversion infrastructure failure: {message}"
+                ) from process_error
+            raise ConverterCrashError(
+                f"converter crashed: {argv[0]} exited {completed.returncode}: "
+                f"{output[-_CRASH_OUTPUT_CHARS:]}"
             ) from process_error
         return completed
 
@@ -382,8 +410,10 @@ class _PreparedConversion:
     paper: Paper
     staged_output: Path | None
     error: str | None
+    tool: str
     deferred: bool = False
     needs_pdf: bool = False
+    crashed: bool = False
 
 
 def command_for(paper: Paper, input_path: Path, output: Path) -> list[str]:
@@ -528,17 +558,24 @@ async def convert_batch(
         return _HTML_IMAGE.sub(replace, html)
 
     async def convert_one(paper: Paper) -> _PreparedConversion:
+        # arXiv papers try pandoc on arXiv's HTML before their own input.
+        tool = _PANDOC_TOOL
         try:
             staged_output = _staged_output_path(workspace, paper)
             if paper.arxiv_id is not None and await convert_arxiv_html(
                 paper, staged_output
             ):
                 return _PreparedConversion(
-                    paper=paper, staged_output=staged_output, error=None
+                    paper=paper, staged_output=staged_output, error=None, tool=tool
                 )
+            tool = _DOCLING_TOOL if paper.input_format == "pdf" else _PANDOC_TOOL
             if paper.input_format == "pdf" and not allow_pdf:
                 return _PreparedConversion(
-                    paper=paper, staged_output=None, error=None, needs_pdf=True
+                    paper=paper,
+                    staged_output=None,
+                    error=None,
+                    tool=tool,
+                    needs_pdf=True,
                 )
             input_path = await materializer.materialize(paper, workspace)
             async with semaphores[paper.input_format]:
@@ -568,16 +605,78 @@ async def convert_batch(
                     f"converter reported success without output: {paper.identifier}"
                 )
             return _PreparedConversion(
-                paper=paper, staged_output=staged_output, error=None
+                paper=paper, staged_output=staged_output, error=None, tool=tool
+            )
+        except ConverterCrashError as error:
+            return _PreparedConversion(
+                paper=paper,
+                staged_output=None,
+                error=str(error),
+                tool=tool,
+                crashed=True,
             )
         except RateLimitedError as error:
             return _PreparedConversion(
-                paper=paper, staged_output=None, error=str(error), deferred=True
+                paper=paper,
+                staged_output=None,
+                error=str(error),
+                tool=tool,
+                deferred=True,
             )
         except PaperError as error:
             return _PreparedConversion(
-                paper=paper, staged_output=None, error=str(error)
+                paper=paper, staged_output=None, error=str(error), tool=tool
             )
+
+    async def converter_works(tool: str, paper: Paper) -> bool:
+        """Run a converter on a known-good input after a crash.
+
+        Args:
+            tool: Converter that crashed.
+            paper: Crashed paper, whose metadata builds the command.
+
+        Returns:
+            True if the converter works; False if the time budget ran out
+            first, which shows nothing either way.
+
+        Raises:
+            InfrastructureError: The converter fails on the known-good input.
+        """
+        timeout = (
+            timeout_seconds
+            if stop_at is None
+            else min(timeout_seconds, stop_at - loop.time())
+        )
+        if timeout <= 0:
+            return False
+        probe = workspace / "probe" / tool
+        probe.mkdir(parents=True)
+        if tool == _DOCLING_TOOL:
+            input_format = "pdf"
+            input_path = _PROBE_PDF
+            output = probe
+            produced = probe / f"{_PROBE_PDF.stem}.md"
+        else:
+            input_format = "html"
+            input_path = probe / "probe.html"
+            input_path.write_text(_PROBE_HTML, encoding="utf-8")
+            output = produced = probe / "probe.md"
+        command = command_for(
+            paper.model_copy(update={"input_format": input_format}), input_path, output
+        )
+        try:
+            await runner.run(command, timeout=timeout)
+        except (ConverterCrashError, PaperError) as error:
+            if stop_at is not None and loop.time() >= stop_at:
+                return False
+            raise InfrastructureError(
+                f"{tool} failed on a known-good document: {error}"
+            ) from error
+        if not produced.exists():
+            raise InfrastructureError(
+                f"{tool} produced no output for a known-good document"
+            )
+        return True
 
     tasks = {asyncio.create_task(convert_one(paper)): paper for paper in batch.papers}
     results: list[_PreparedConversion] = []
@@ -608,6 +707,22 @@ async def convert_batch(
                     raise InfrastructureError(
                         "unexpected converter task failure"
                     ) from error
+
+        crashed = [result for result in results if result.crashed]
+        ran = [r for r in results if not r.deferred and not r.needs_pdf]
+        if len(crashed) > 1 and len(crashed) == len(ran):
+            raise InfrastructureError(
+                f"every conversion in the batch crashed: {crashed[0].error}"
+            )
+        # A success proves only its own converter: pandoc working says nothing
+        # about docling. Any other converter that crashed must pass a probe, so
+        # a broken install cannot strike papers one small batch at a time.
+        proven = {r.tool for r in results if r.staged_output is not None}
+        for tool in sorted({result.tool for result in crashed} - proven):
+            tool_crashes = [result for result in crashed if result.tool == tool]
+            if not await converter_works(tool, tool_crashes[0].paper):
+                interrupted.extend(result.paper for result in tool_crashes)
+                results = [result for result in results if result not in tool_crashes]
 
         succeeded = _promote_successes(results, root)
         failures = {

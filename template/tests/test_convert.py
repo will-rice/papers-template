@@ -38,7 +38,12 @@ from papers_pipeline.convert import (
     write_figure,
 )
 from papers_pipeline import convert
-from papers_pipeline.errors import InfrastructureError, PaperError, RateLimitedError
+from papers_pipeline.errors import (
+    ConverterCrashError,
+    InfrastructureError,
+    PaperError,
+    RateLimitedError,
+)
 from papers_pipeline.http import RequestClient
 from papers_pipeline.models import FailureAttempt, InputFormat, Paper, PipelineState
 from papers_pipeline.remote import (
@@ -365,7 +370,7 @@ async def test_command_runner_isolates_recognized_corrupt_document_failure() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("returncode", [-15, 137, 143])
-async def test_command_runner_maps_termination_exits_to_infrastructure_error(
+async def test_command_runner_reports_termination_exits_as_crashes(
     returncode: int,
 ) -> None:
     if returncode < 0:
@@ -373,7 +378,7 @@ async def test_command_runner_maps_termination_exits_to_infrastructure_error(
     else:
         script = f"raise SystemExit({returncode})"
 
-    with pytest.raises(InfrastructureError, match="conversion infrastructure failure"):
+    with pytest.raises(ConverterCrashError, match="converter crashed"):
         await CommandRunner().run([sys.executable, "-c", script], timeout=5)
 
 
@@ -388,18 +393,40 @@ async def test_command_runner_maps_termination_exits_to_infrastructure_error(
         ("cache directory is not writable", "stderr"),
         ("PyTorch shared library could not be loaded", "stderr"),
         ("libcudnn.so: cannot open shared object file", "stderr"),
-        ("unclassified converter failure", "stderr"),
     ],
 )
-async def test_command_runner_fails_safe_for_infrastructure_and_unknown_errors(
+async def test_command_runner_fails_safe_for_infrastructure_errors(
     message: str,
     stream: str,
 ) -> None:
     destination = "" if stream == "stdout" else ", file=sys.stderr"
     script = f"import sys; print({message!r}{destination}); raise SystemExit(1)"
 
-    with pytest.raises(InfrastructureError, match="conversion infrastructure failure"):
+    with pytest.raises(
+        InfrastructureError, match="conversion infrastructure failure"
+    ) as exc_info:
         await CommandRunner().run([sys.executable, "-c", script], timeout=5)
+    assert not isinstance(exc_info.value, ConverterCrashError)
+
+
+@pytest.mark.asyncio
+async def test_command_runner_reports_unknown_exit_as_crash_with_bounded_output() -> (
+    None
+):
+    script = "import sys; print('#' * 5000 + 'end', file=sys.stderr); sys.exit(1)"
+
+    with pytest.raises(ConverterCrashError, match="end$") as exc_info:
+        await CommandRunner().run([sys.executable, "-c", script], timeout=5)
+    assert str(exc_info.value).count("#") == 1997
+
+
+@pytest.mark.asyncio
+async def test_command_runner_keeps_unrunnable_tool_exit_as_infrastructure() -> None:
+    with pytest.raises(InfrastructureError) as exc_info:
+        await CommandRunner().run(
+            [sys.executable, "-c", "raise SystemExit(127)"], timeout=5
+        )
+    assert not isinstance(exc_info.value, ConverterCrashError)
 
 
 @pytest.mark.asyncio
@@ -1464,6 +1491,203 @@ async def test_unexpected_task_failure_is_wrapped_as_infrastructure_error(
             fake_materializer,
             NOW,
         )
+
+
+_CRASH_CONVERTER = """
+import os, signal, sys, time
+from pathlib import Path
+
+broken, tool, *args = sys.argv[1:]
+if tool in broken.split(","):
+    raise SystemExit(1)
+source = args[1] if tool == "docling" else args[0]
+if "crash" in Path(source).name:
+    os.kill(os.getpid(), signal.SIGSEGV)
+if "slow" in Path(source).name:
+    time.sleep(60)
+if tool == "docling":
+    output = Path(args[args.index("--output") + 1]) / f"{Path(source).stem}.md"
+else:
+    output = Path(next(a for a in args if a.startswith("--output=")).split("=", 1)[1])
+output.write_text("# converted\\n", encoding="utf-8")
+"""
+
+
+class CrashingConverterRunner(CommandRunner):
+    """Run each conversion as a real child process that can really crash."""
+
+    def __init__(self, script: Path, broken: Sequence[str] = ()) -> None:
+        super().__init__()
+        script.write_text(_CRASH_CONVERTER, encoding="utf-8")
+        self.prefix = [sys.executable, str(script), ",".join(broken)]
+
+    async def run(
+        self, argv: Sequence[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        return await super().run([*self.prefix, *argv], timeout)
+
+
+async def _convert_with_crashes(
+    root: Path,
+    papers: Sequence[Paper],
+    state: PipelineState | None = None,
+    broken: Sequence[str] = (),
+    time_budget_seconds: float | None = None,
+) -> convert.ConversionResult:
+    workspace = root / "work"
+    workspace.mkdir(exist_ok=True)
+    return await convert_batch(
+        Batch(papers=tuple(papers), estimated_cost=len(papers)),
+        workspace,
+        state or PipelineState(),
+        CONCURRENCY,
+        CrashingConverterRunner(root / "converter.py", broken),
+        FakeMaterializer(
+            fixtures={item.input_url: fixture_for(item) for item in papers}
+        ),
+        NOW,
+        time_budget_seconds=time_budget_seconds,
+    )
+
+
+@pytest.mark.asyncio
+async def test_crash_strikes_the_paper_and_keeps_its_successful_peer(
+    tmp_path: Path,
+) -> None:
+    crash = paper("doi:crash", input_format="html")
+    peer = paper("doi:peer", input_format="html")
+
+    result = await _convert_with_crashes(tmp_path, [crash, peer])
+
+    assert [item.paper for item in result.succeeded] == [peer]
+    assert [item.paper for item in result.failed] == [crash]
+    assert "converter crashed" in result.state.failures[crash.identifier][0].error
+    assert expected_markdown(tmp_path / "work", peer).exists()
+
+
+@pytest.mark.asyncio
+async def test_third_crash_writes_fixme_so_the_queue_moves_on(tmp_path: Path) -> None:
+    crash = paper("doi:crash", input_format="html")
+    peer = paper("doi:peer", input_format="html")
+    state = PipelineState(
+        failures={
+            crash.identifier: [
+                FailureAttempt(occurred_at=NOW.replace(day=day), error="crash")
+                for day in (21, 22)
+            ]
+        }
+    )
+
+    result = await _convert_with_crashes(tmp_path, [crash, peer], state)
+
+    marker = expected_markdown(tmp_path / "work", crash).with_suffix(".fixme.txt")
+    assert result.promoted == (marker,)
+    assert result.state.failures == {}
+    assert infer_backlog([crash, peer], tmp_path / "work").pending == ()
+
+
+@pytest.mark.asyncio
+async def test_batch_where_every_paper_crashes_aborts_without_strikes(
+    tmp_path: Path,
+) -> None:
+    papers = [
+        paper("doi:crash-1", input_format="html"),
+        paper("doi:crash-2", input_format="html"),
+    ]
+
+    with pytest.raises(InfrastructureError, match="every conversion in the batch"):
+        await _convert_with_crashes(tmp_path, papers)
+
+    assert infer_backlog(papers, tmp_path / "work").pending == tuple(papers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_format", ["html", "pdf"])
+async def test_lone_crash_strikes_the_paper_when_the_converter_passes_a_probe(
+    tmp_path: Path, input_format: InputFormat
+) -> None:
+    crash = paper("doi:crash", input_format=input_format)
+
+    result = await _convert_with_crashes(tmp_path, [crash])
+
+    assert [item.paper for item in result.failed] == [crash]
+    assert len(result.state.failures[crash.identifier]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_format", "tool"), [("html", "pandoc"), ("pdf", "docling")]
+)
+async def test_lone_crash_in_a_broken_environment_aborts_without_a_strike(
+    tmp_path: Path, input_format: InputFormat, tool: str
+) -> None:
+    crash = paper("doi:crash", input_format=input_format)
+
+    with pytest.raises(InfrastructureError, match="known-good document"):
+        await _convert_with_crashes(tmp_path, [crash], broken=[tool])
+
+    assert infer_backlog([crash], tmp_path / "work").pending == (crash,)
+
+
+@pytest.mark.asyncio
+async def test_success_with_one_converter_does_not_excuse_another_that_is_broken(
+    tmp_path: Path,
+) -> None:
+    healthy = paper("doi:html", input_format="html")
+    broken = paper("doi:pdf", input_format="pdf")
+
+    with pytest.raises(InfrastructureError, match="docling failed on a known-good"):
+        await _convert_with_crashes(tmp_path, [healthy, broken], broken=["docling"])
+
+    assert infer_backlog([healthy, broken], tmp_path / "work").pending == (
+        healthy,
+        broken,
+    )
+
+
+@pytest.mark.asyncio
+async def test_crash_with_no_time_left_to_probe_stays_pending_without_a_strike(
+    tmp_path: Path,
+) -> None:
+    crash = paper("doi:crash", input_format="html")
+    slow = paper("doi:slow", input_format="html")
+
+    result = await _convert_with_crashes(
+        tmp_path, [crash, slow], time_budget_seconds=1.0
+    )
+
+    assert set(result.interrupted) == {crash, slow}
+    assert result.failed == ()
+    assert result.promoted == ()
+    assert result.state.failures == {}
+
+
+@pytest.mark.conversion
+@pytest.mark.asyncio
+async def test_real_converters_pass_the_crash_probe(tmp_path: Path) -> None:
+    class CrashOnPoison(CommandRunner):
+        async def run(
+            self, argv: Sequence[str], timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            if any("crash" in Path(arg).name for arg in argv):
+                argv = [sys.executable, "-c", "raise SystemExit(1)"]
+            return await super().run(argv, timeout)
+
+    for input_format in ("html", "pdf"):
+        crash = paper(f"doi:crash-{input_format}", input_format=input_format)
+        fixture = FIXTURES / ("text.pdf" if input_format == "pdf" else "sample.html")
+
+        result = await convert_batch(
+            Batch(papers=(crash,), estimated_cost=1),
+            tmp_path,
+            PipelineState(),
+            CONCURRENCY,
+            CrashOnPoison(),
+            FakeMaterializer(fixtures={crash.input_url: fixture}),
+            NOW,
+        )
+
+        assert [item.paper for item in result.failed] == [crash]
 
 
 def _kind_for(argv: Sequence[str]) -> str:

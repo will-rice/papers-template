@@ -17,6 +17,14 @@ class SourceUnavailableError(InfrastructureError):
     """A paper source's API could not be used this run; other sources can."""
 
 
+class ConverterCrashError(InfrastructureError):
+    """A converter died without naming a cause.
+
+    It aborts like any infrastructure failure unless convert_batch shows the
+    converter still works, which makes the crash that one paper's failure.
+    """
+
+
 class PaperError(PipelineError):
     """One paper failed without invalidating unrelated work."""
 
