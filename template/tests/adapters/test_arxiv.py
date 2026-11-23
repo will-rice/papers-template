@@ -325,6 +325,32 @@ async def test_arxiv_empty_page_before_total_results_is_not_complete(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("arxiv_id", ["cs/9812006v1", "cmp-lg/9608012v1"])
+async def test_arxiv_keeps_the_archive_of_an_old_style_id(
+    arxiv_config: AdapterConfig, arxiv_id: str
+) -> None:
+    entry = ARXIV_ENTRY.replace("2401.00009v1", arxiv_id)
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, text=_arxiv_feed(1, entry))
+    )
+    config = FetchConfig(
+        request_timeout_seconds=5,
+        retries=1,
+        backoff_seconds=0,
+        total_deadline_seconds=300,
+    )
+    async with RequestClient(
+        config, Deadline.start(300), transport=transport
+    ) as client:
+        page = await ArxivAdapter().fetch(ARXIV_WINDOW, None, client, arxiv_config)
+
+    [record] = page.records
+    assert record.arxiv_id == arxiv_id
+    assert record.url == f"https://arxiv.org/abs/{arxiv_id}"
+    assert record.input_url == f"https://arxiv.org/pdf/{arxiv_id}"
+
+
+@pytest.mark.asyncio
 async def test_arxiv_empty_page_at_total_results_completes(
     arxiv_config: AdapterConfig,
 ) -> None:

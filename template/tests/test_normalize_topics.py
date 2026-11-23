@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import itertools
 import subprocess
 import sys
@@ -6,6 +7,7 @@ import textwrap
 
 import pytest
 
+from papers_pipeline.batching import expected_markdown
 from papers_pipeline.config import TopicConfig
 from papers_pipeline.errors import ConfigError
 from papers_pipeline.models import Paper, SourceRecord
@@ -353,6 +355,101 @@ def test_deduplicate_row_does_not_learn_an_id_another_row_owns(
 
     assert rows[by_doi.identifier].arxiv_id is None
     assert rows[by_arxiv.identifier].doi is None
+
+
+def stripped_row(source_record: SourceRecord) -> Paper:
+    return normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "source_id": "9812006v1",
+                "arxiv_id": "9812006v1",
+                "published": datetime(1998, 12, 5, 0, 0, 57, tzinfo=timezone.utc),
+                "url": "https://arxiv.org/abs/9812006v1",
+                "input_url": "https://arxiv.org/pdf/9812006v1",
+            }
+        )
+    )
+
+
+def old_style_report(stored: Paper, arxiv_id: str, **update: object) -> Paper:
+    return normalize(
+        SourceRecord(
+            source="arxiv",
+            source_id=arxiv_id,
+            arxiv_id=arxiv_id,
+            title=stored.title,
+            abstract=stored.abstract,
+            authors=stored.authors,
+            published=stored.published,
+            url=f"https://arxiv.org/abs/{arxiv_id}",
+            input_format="pdf",
+            input_url=f"https://arxiv.org/pdf/{arxiv_id}",
+        ).model_copy(update=update)
+    )
+
+
+def test_deduplicate_repairs_a_stripped_old_style_id(
+    source_record: SourceRecord, tmp_path: Path
+) -> None:
+    stored = stripped_row(source_record)
+    report = old_style_report(stored, "cs/9812006v1", title="A Revised Title")
+
+    [row] = deduplicate([report], inventory=[stored])
+
+    assert row.identifier == "arxiv:9812006v1"
+    assert expected_markdown(tmp_path, row) == expected_markdown(tmp_path, stored)
+    assert row.arxiv_id == "cs/9812006v1"
+    assert row.url == "https://arxiv.org/abs/cs/9812006v1"
+    assert row.input_url == "https://arxiv.org/pdf/cs/9812006v1"
+    assert deduplicate([report], inventory=[row]) == [row]
+
+
+def test_deduplicate_repairs_from_a_date_only_report_with_the_same_title(
+    source_record: SourceRecord,
+) -> None:
+    stored = stripped_row(source_record)
+    report = old_style_report(
+        stored,
+        "cs/9812006",
+        source="semantic_scholar",
+        published=datetime(1998, 12, 5, tzinfo=timezone.utc),
+    )
+
+    [row] = deduplicate([report], inventory=[stored])
+
+    assert (row.identifier, row.arxiv_id) == ("arxiv:9812006v1", "cs/9812006")
+    assert row.published == stored.published
+
+
+def test_deduplicate_keeps_another_archive_with_the_same_number_apart(
+    source_record: SourceRecord,
+) -> None:
+    stored = stripped_row(source_record)
+    other = old_style_report(
+        stored,
+        "hep-th/9812006v1",
+        title="Another Paper",
+        published=datetime(1998, 12, 5, 3, 0, tzinfo=timezone.utc),
+    )
+
+    rows = deduplicate([other], inventory=[stored])
+
+    assert {row.identifier: row.arxiv_id for row in rows} == {
+        "arxiv:9812006v1": "9812006v1",
+        "arxiv:hep-th/9812006v1": "hep-th/9812006v1",
+    }
+
+
+@pytest.mark.parametrize("modern_id", ["9812.0060", "9812.00600v1", "0704.0001"])
+def test_deduplicate_never_matches_a_stripped_id_to_a_modern_id(
+    source_record: SourceRecord, modern_id: str
+) -> None:
+    stored = stripped_row(source_record)
+
+    rows = deduplicate([old_style_report(stored, modern_id)], inventory=[stored])
+
+    assert {row.arxiv_id for row in rows} == {"9812006v1", modern_id}
 
 
 def test_deduplicate_gives_a_new_paper_one_identifier_in_any_source_order(

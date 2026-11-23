@@ -17,6 +17,10 @@ SOURCE_RANK: dict[str, int] = {
     "biorxiv_crossref": 6,
 }
 _DEFAULT_SOURCE_RANK = max(SOURCE_RANK.values(), default=0) + 1
+# An old-style arXiv ID stored without its archive. Modern IDs contain a dot,
+# so this never matches one.
+STRIPPED_ARXIV_ID = re.compile(r"\d{7}(?:v\d+)?")
+_OLD_STYLE_ARXIV_ID = re.compile(r"[a-z-]+(?:\.[a-z-]+)?/(?P<number>\d{7})(?:v\d+)?")
 
 
 @dataclass
@@ -66,7 +70,8 @@ def deduplicate(
     File names and failure history are keyed by identifier, so a row in the
     inventory is never renamed and never merged into another row. Reports that
     match a row enrich it, filling only strong IDs the row lacks and no other
-    row holds; the rest become new papers.
+    row holds; the rest become new papers. The one replaced ID is an old-style
+    arXiv ID stored without its archive, repaired from the report of that paper.
 
     Args:
         papers: Freshly fetched papers.
@@ -86,7 +91,10 @@ def deduplicate(
     ]
     strong_index: dict[str, int] = {}
     bibliographic_index: defaultdict[str, list[int]] = defaultdict(list)
+    stripped_rows: defaultdict[str, list[int]] = defaultdict(list)
     for row_id, row in enumerate(rows):
+        if row.paper.arxiv_id and STRIPPED_ARXIV_ID.fullmatch(row.paper.arxiv_id):
+            stripped_rows[row.paper.arxiv_id[:7]].append(row_id)
         for identity_key in row.identity_keys:
             strong_index.setdefault(identity_key, row_id)
         for bibliographic_key in row.bibliographic_keys:
@@ -106,6 +114,9 @@ def deduplicate(
                 report.strong_keys, rows[row_id].strong_keys
             )
         }
+        repaired_row = _claim_stripped_row(report, rows, stripped_rows, strong_index)
+        if repaired_row is not None:
+            matches = {repaired_row}
         if not matches:
             new_papers.append(report.paper)
             continue
@@ -121,7 +132,18 @@ def deduplicate(
             and strong_index.get(_arxiv_key(report.paper.arxiv_id), row_id) == row_id
         ):
             arxiv_id = report.paper.arxiv_id
-        enriched = _merge_clusters(row, report).paper.model_copy(
+        merged = _merge_clusters(row, report).paper
+        if repaired_row is not None:
+            arxiv_id = report.paper.arxiv_id
+            merged = row.paper.model_copy(
+                update={
+                    "categories": merged.categories,
+                    "url": report.paper.url,
+                    "input_format": report.paper.input_format,
+                    "input_url": report.paper.input_url,
+                }
+            )
+        enriched = merged.model_copy(
             update={
                 "identifier": row.paper.identifier,
                 "doi": doi,
@@ -139,6 +161,43 @@ def deduplicate(
             strong_index.setdefault(strong_key, row_id)
 
     return sorted([*(row.paper for row in rows), *new_papers], key=_output_key)
+
+
+def _claim_stripped_row(
+    report: _Cluster,
+    rows: list[_Cluster],
+    stripped_rows: dict[str, list[int]],
+    strong_index: dict[str, int],
+) -> int | None:
+    """Return the row holding this report's old-style ID without its archive.
+
+    Archives reuse numbers (cs/9812006, hep-th/9812006), so the number alone
+    is not enough: the row must also have the report's exact submission time,
+    or its title and date. A claimed row leaves ``stripped_rows``.
+
+    Args:
+        report: The report cluster.
+        rows: The inventory rows.
+        stripped_rows: Row positions by seven-digit number.
+        strong_index: Row position by identity key.
+
+    Returns:
+        The row position, or None when no stripped row is this paper.
+    """
+    arxiv_id = report.paper.arxiv_id
+    old_style = _OLD_STYLE_ARXIV_ID.fullmatch(arxiv_id) if arxiv_id else None
+    if arxiv_id is None or old_style is None or _arxiv_key(arxiv_id) in strong_index:
+        return None
+    candidates = stripped_rows.get(old_style["number"], [])
+    for row_id in candidates:
+        stored = rows[row_id].paper
+        if (
+            stored.published == report.paper.published
+            or _bibliographic_key(stored) in report.bibliographic_keys
+        ):
+            candidates.remove(row_id)
+            return row_id
+    return None
 
 
 def _cluster_reports(papers: Iterable[Paper]) -> list[_Cluster]:

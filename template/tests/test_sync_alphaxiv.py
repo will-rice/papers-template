@@ -139,6 +139,18 @@ def test_dropped_arxiv_ids_reads_rows_removed_from_history(tmp_path: Path) -> No
     assert dropped_arxiv_ids(inventory, read_arxiv_ids(inventory)) == ["2608.00002"]
 
 
+def test_stripped_old_style_ids_never_reach_alphaxiv(tmp_path: Path) -> None:
+    inventory = tmp_path / "papers.csv"
+    write_inventory(inventory, "9812006v1", "9608012v1", "2608.00001v1")
+    assert read_arxiv_ids(inventory) == ["2608.00001"]
+
+    write_inventory(inventory, "cs/9812006v1", "9608012v1", "2608.00001v1")
+
+    current = read_arxiv_ids(inventory)
+    assert current == ["cs/9812006", "2608.00001"]
+    assert dropped_arxiv_ids(inventory, current) == []
+
+
 async def test_sync_collection_removes_dropped_papers(tmp_path: Path) -> None:
     inventory = tmp_path / "papers.csv"
     write_inventory(inventory, "2608.00001v1", "2608.00002v1")

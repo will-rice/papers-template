@@ -173,7 +173,7 @@ def _required_identifier(entry: ElementTree.Element) -> str:
         _find_text(entry, "a:id"), field="id", identifier="<unknown>"
     )
     normalized = re.sub(
-        r"(?i)^arxiv:", "", raw_identifier.rstrip("/").rsplit("/", 1)[-1]
+        r"(?i)^arxiv:", "", raw_identifier.rstrip("/").rsplit("/abs/", 1)[-1]
     )
     identifier = _clean(normalized)
     if not identifier:

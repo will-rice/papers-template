@@ -25,6 +25,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 
 from papers_pipeline.http import RETRYABLE_STATUS_CODES
+from papers_pipeline.normalize import STRIPPED_ARXIV_ID
 
 INVENTORY = Path("papers.csv")
 MCP_URL = "https://api.alphaxiv.org/mcp/v1"
@@ -147,7 +148,7 @@ def read_arxiv_ids(path: Path) -> list[str]:
         identifiers = (
             re.sub(r"v\d+$", "", row["arxiv_id"])
             for row in csv.DictReader(inventory_file)
-            if row["arxiv_id"]
+            if row["arxiv_id"] and not STRIPPED_ARXIV_ID.fullmatch(row["arxiv_id"])
         )
         return list(dict.fromkeys(identifiers))
 
@@ -183,7 +184,10 @@ def dropped_arxiv_ids(inventory: Path, current: list[str]) -> list[str]:
     removed = {
         re.sub(r"v\d+$", "", row[column])
         for row in removed_rows
-        if len(row) > column and row[column] and row[column] != "arxiv_id"
+        if len(row) > column
+        and row[column]
+        and row[column] != "arxiv_id"
+        and not STRIPPED_ARXIV_ID.fullmatch(row[column])
     }
     return sorted(removed - set(current))
 
