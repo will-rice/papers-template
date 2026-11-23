@@ -11,7 +11,7 @@ import httpx
 from .config import FetchConfig
 from .errors import SourceUnavailableError
 
-_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _NON_RETRYABLE_REQUEST_ERROR_MESSAGE = "request failed"
 
 
@@ -96,7 +96,7 @@ class RequestClient:
                     raise SourceUnavailableError(
                         f"redirect HTTP {response.status_code}: {url}"
                     )
-                if response.status_code in _RETRYABLE_STATUS_CODES:
+                if response.status_code in RETRYABLE_STATUS_CODES:
                     if attempt == self.config.retries:
                         raise SourceUnavailableError(
                             f"request retries exhausted: {url}"

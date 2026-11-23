@@ -1,16 +1,20 @@
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
+import httpx2
 import pytest
 from mcp import Client
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from papers_pipeline.alphaxiv_sync import (
+    SYNC_ATTEMPTS,
     dropped_arxiv_ids,
     main,
     read_arxiv_ids,
+    sync,
     sync_collection,
 )
 
@@ -173,6 +177,121 @@ async def test_sync_collection_reports_tool_errors(tmp_path: Path) -> None:
     async with Client(server) as client:
         with pytest.raises(ValueError, match="save_papers_to_folder failed: .*write"):
             await sync_collection(inventory, COLLECTION, client)
+
+
+def alphaxiv_http_stub(
+    failures: dict[str, list[httpx2.Response]],
+    *,
+    tool_is_error: bool = False,
+    folder_name: str = COLLECTION,
+) -> tuple[httpx2.MockTransport, list[str]]:
+    """Return an MCP HTTP edge that first answers each method with its failures."""
+    posted: list[str] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if request.method != "POST":
+            return httpx2.Response(405)
+        message = json.loads(request.content)
+        method = message["method"]
+        tool = message["params"]["name"] if method == "tools/call" else None
+        posted.append(tool or method)
+        if "id" not in message:
+            return httpx2.Response(202)
+        if failures.get(method):
+            return failures[method].pop(0)
+        if method == "server/discover":
+            error = {"code": -32601, "message": "Method not found"}
+            return httpx2.Response(
+                200, json={"jsonrpc": "2.0", "id": message["id"], "error": error}
+            )
+        if method == "initialize":
+            result: dict[str, object] = {
+                "protocolVersion": message["params"]["protocolVersion"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "alphaxiv", "version": "1"},
+            }
+        elif method == "tools/list":
+            result = {"tools": []}
+        elif tool == "list_library":
+            folders = [{"folder_id": "folder-0", "name": folder_name}]
+            text = json.dumps({"folders": folders})
+            result = {"content": [{"type": "text", "text": text}], "isError": False}
+        else:
+            result = {
+                "content": [{"type": "text", "text": '{"saved": 1}'}],
+                "isError": tool_is_error,
+            }
+        reply = {"jsonrpc": "2.0", "id": message["id"], "result": result}
+        return httpx2.Response(200, json=reply)
+
+    return httpx2.MockTransport(handle), posted
+
+
+async def no_wait(_: float) -> None:
+    """Skip the delay between sync attempts."""
+
+
+@pytest.mark.parametrize(
+    ("method", "failure"),
+    [
+        ("initialize", httpx2.Response(504)),
+        (
+            "tools/call",
+            httpx2.Response(
+                200, headers={"content-type": "text/event-stream"}, content=b""
+            ),
+        ),
+    ],
+    ids=["gateway-timeout-during-setup", "sse-ended-during-tool-call"],
+)
+async def test_sync_retries_transient_failures(
+    tmp_path: Path, method: str, failure: httpx2.Response
+) -> None:
+    inventory = tmp_path / "papers.csv"
+    write_inventory(inventory, "2608.26403v1")
+    transport, posted = alphaxiv_http_stub({method: [failure]})
+
+    await sync(inventory, COLLECTION, "key", transport=transport, sleep=no_wait)
+
+    assert posted.count("initialize") == 2
+    assert "save_papers_to_folder" in posted
+
+
+async def test_sync_gives_up_after_bounded_attempts(tmp_path: Path) -> None:
+    inventory = tmp_path / "papers.csv"
+    write_inventory(inventory, "2608.26403v1")
+    transport, posted = alphaxiv_http_stub(
+        {"initialize": [httpx2.Response(504) for _ in range(99)]}
+    )
+
+    with pytest.raises(ExceptionGroup):
+        await sync(inventory, COLLECTION, "key", transport=transport, sleep=no_wait)
+
+    assert posted.count("initialize") == SYNC_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("stub_options", "failures"),
+    [
+        ({"tool_is_error": True}, {}),
+        ({"folder_name": "Other"}, {}),
+        ({}, {"initialize": [httpx2.Response(401)]}),
+    ],
+    ids=["tool-error", "missing-folder", "rejected-api-key"],
+)
+async def test_sync_does_not_retry_permanent_failures(
+    tmp_path: Path,
+    stub_options: dict[str, Any],
+    failures: dict[str, list[httpx2.Response]],
+) -> None:
+    inventory = tmp_path / "papers.csv"
+    write_inventory(inventory, "2608.26403v1")
+    transport, posted = alphaxiv_http_stub(failures, **stub_options)
+
+    with pytest.raises((ValueError, ExceptionGroup)):
+        await sync(inventory, COLLECTION, "key", transport=transport, sleep=no_wait)
+
+    assert posted.count("initialize") == 1
 
 
 @pytest.mark.parametrize(

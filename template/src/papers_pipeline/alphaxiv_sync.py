@@ -14,12 +14,17 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
+from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
+
+from papers_pipeline.http import RETRYABLE_STATUS_CODES
 
 INVENTORY = Path("papers.csv")
 MCP_URL = "https://api.alphaxiv.org/mcp/v1"
@@ -28,6 +33,8 @@ MCP_TIMEOUT = httpx2.Timeout(30.0, read=300.0)
 # save_papers_to_folder and remove_papers_from_folder accept at most 50 papers
 # per call.
 BATCH_SIZE = 50
+SYNC_ATTEMPTS = 4
+SYNC_RETRY_SECONDS = 30.0
 
 
 def main() -> None:
@@ -40,12 +47,71 @@ def main() -> None:
     asyncio.run(sync(INVENTORY, collection, api_key))
 
 
-async def sync(inventory: Path, collection: str, api_key: str) -> None:
+async def sync(
+    inventory: Path,
+    collection: str,
+    api_key: str,
+    *,
+    transport: httpx2.AsyncBaseTransport | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Run the sync, repeating it from a new session after a transient failure.
+
+    Args:
+        inventory: The inventory file.
+        collection: Name of the alphaXiv folder.
+        api_key: alphaXiv API key.
+        transport: HTTP transport, for pointing the client at a local stub.
+        sleep: Waits between attempts.
+    """
     headers = {"Authorization": f"Bearer {api_key}"}
-    async with httpx2.AsyncClient(headers=headers, timeout=MCP_TIMEOUT) as http_client:
-        transport = streamable_http_client(MCP_URL, http_client=http_client)
-        async with Client(transport) as client:
-            await sync_collection(inventory, collection, client)
+    for attempt in range(SYNC_ATTEMPTS):
+        post_statuses: list[int] = []
+
+        async def record_post_status(response: httpx2.Response) -> None:
+            if response.request.method == "POST":
+                post_statuses.append(response.status_code)
+
+        try:
+            async with httpx2.AsyncClient(
+                headers=headers,
+                timeout=MCP_TIMEOUT,
+                transport=transport,
+                event_hooks={"response": [record_post_status]},
+            ) as http_client:
+                mcp_transport = streamable_http_client(MCP_URL, http_client=http_client)
+                async with Client(mcp_transport) as client:
+                    await sync_collection(inventory, collection, client)
+            return
+        except (MCPError, httpx2.TransportError, ExceptionGroup) as error:
+            last_status = post_statuses[-1] if post_statuses else None
+            if attempt == SYNC_ATTEMPTS - 1 or not is_transient(error, last_status):
+                raise
+            logging.warning("alphaXiv sync attempt %d failed: %s", attempt + 1, error)
+        await sleep(SYNC_RETRY_SECONDS * 2**attempt)
+
+
+def is_transient(error: BaseException, last_status: int | None) -> bool:
+    """Return whether every failure in a possibly nested group is transient.
+
+    The SDK reports any HTTP error status as the same MCPError, so the status
+    of the last POST tells a gateway timeout from a rejected API key.
+
+    Args:
+        error: The raised exception or exception group.
+        last_status: HTTP status of the last POST, if one was answered.
+
+    Returns:
+        True if repeating the sync can succeed.
+    """
+    if isinstance(error, BaseExceptionGroup):
+        return all(is_transient(inner, last_status) for inner in error.exceptions)
+    if isinstance(error, MCPError):
+        return (
+            error.code in {CONNECTION_CLOSED, REQUEST_TIMEOUT}
+            or last_status in RETRYABLE_STATUS_CODES
+        )
+    return isinstance(error, httpx2.TransportError)
 
 
 async def sync_collection(inventory: Path, collection: str, client: Client) -> None:
