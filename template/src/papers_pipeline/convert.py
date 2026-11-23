@@ -116,11 +116,13 @@ _NON_BODY_LINE = re.compile(
 # Markup that carries no paper text: docling's placeholders, such as
 # "<!-- image -->", and image links, whose alt text pandoc may wrap over lines.
 _NON_BODY_MARKUP = re.compile(r"<!--.*?-->|!\[[^\]]*\]\([^)\n]*\)", re.DOTALL)
-# Words a reader can use: four or more letters, untouched by U+FFFD or digits.
-_WHOLE_WORD = re.compile(r"(?<![\w\ufffd])[^\W\d_]{4,}(?![\w\ufffd])")
-# Runs of one or two letters. A backend that splits words ("m icrophone")
+# One token: a run of letters untouched by U+FFFD, digits or underscores.
+_WORD_TOKEN = re.compile(r"(?<![\w\ufffd])[^\W\d_]+(?![\w\ufffd])")
+# Tokens this long are words a reader can use.
+_WHOLE_WORD_LETTERS = 4
+# Tokens this short are fragments. A backend that splits words ("m icrophone")
 # raises their share of the text, while its word count can still go up.
-_WORD_FRAGMENT = re.compile(r"(?<![^\W\d_])[^\W\d_]{1,2}(?![^\W\d_])")
+_WORD_FRAGMENT_LETTERS = 2
 
 
 class CommandRunner:
@@ -915,16 +917,26 @@ def is_cleaner_conversion(retry: str, first: str) -> bool:
         True if the retry should replace the first output.
     """
     retry_body, first_body = _body_text(retry), _body_text(first)
-    retry_words = len(_WHOLE_WORD.findall(retry_body))
-    first_words = len(_WHOLE_WORD.findall(first_body))
+    retry_words, retry_fragments = _token_counts(retry_body)
+    first_words, first_fragments = _token_counts(first_body)
     return (
         has_real_body(retry)
         and retry_body.count("\ufffd") < first_body.count("\ufffd")
+        # With no whole word in the first output there is no fragment share to
+        # compare against, so the retry cannot be shown to be cleaner.
+        and first_words > 0
         and retry_words >= first_words
-        # Cross-multiplied shares, so a first output with no words cannot divide
-        # by zero.
-        and len(_WORD_FRAGMENT.findall(retry_body)) * first_words
-        <= len(_WORD_FRAGMENT.findall(first_body)) * retry_words
+        # Cross-multiplied shares, so neither word count is a divisor.
+        and retry_fragments * first_words <= first_fragments * retry_words
+    )
+
+
+def _token_counts(body: str) -> tuple[int, int]:
+    """Count whole words and word fragments from one tokenization."""
+    lengths = [len(token) for token in _WORD_TOKEN.findall(body)]
+    return (
+        sum(length >= _WHOLE_WORD_LETTERS for length in lengths),
+        sum(length <= _WORD_FRAGMENT_LETTERS for length in lengths),
     )
 
 

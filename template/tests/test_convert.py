@@ -2235,6 +2235,12 @@ async def test_garbled_pdf_output_is_converted_again_with_pdfium(
             "Clean micr\ufffdphone model text speech.",
             False,
         ),
+        ("s ignal p rocessing m odel", "de\ufffdne speci\ufffdc", False),
+        (
+            "Clean model text s ignal p rocessing m odel",
+            "Clean model text de\ufffdne speci\ufffdc",
+            False,
+        ),
     ],
 )
 def test_is_cleaner_conversion(retry: str, first: str, expected: bool) -> None:
