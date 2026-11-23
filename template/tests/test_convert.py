@@ -2241,40 +2241,18 @@ def test_is_cleaner_conversion(retry: str, first: str, expected: bool) -> None:
     assert is_cleaner_conversion(retry, first) is expected
 
 
-def test_requeue_outdated_conversions_removes_garbled_papers(tmp_path: Path) -> None:
-    garbled = paper("arxiv:1", input_format="pdf")
-    isolated = paper("arxiv:2", input_format="pdf")
-    for item, body in [
-        (garbled, "text " * 10 + "\ufffd"),
-        (isolated, "text " * 100 + "\ufffd"),
-    ]:
+def test_requeue_outdated_conversions_leaves_stubs_and_garbled_papers(
+    tmp_path: Path,
+) -> None:
+    stub = paper("arxiv:1", input_format="html")
+    garbled = paper("arxiv:2", input_format="pdf")
+    for item, body in [(stub, "## Abstract\n"), (garbled, "text " * 10 + "\ufffd")]:
         expected_markdown(tmp_path, item).parent.mkdir(parents=True, exist_ok=True)
         expected_markdown(tmp_path, item).write_text(body, encoding="utf-8")
 
-    removed = requeue_outdated_conversions(tmp_path, [garbled, isolated])
-
-    assert removed == [expected_markdown(tmp_path, garbled)]
-
-
-def test_requeue_outdated_conversions_removes_bodyless_papers(tmp_path: Path) -> None:
-    empty = paper("arxiv:1", input_format="html")
-    wrapper = paper("arxiv:2", input_format="html")
-    short = paper("arxiv:3", input_format="html")
-    for item, body in [
-        (empty, with_front_matter(empty, "## Abstract\n")),
-        (wrapper, "See pages 1-last of [x.pdf](https://x.pdf)\n"),
-        (short, with_front_matter(short, "## Abstract\n\nA short paper.\n")),
-    ]:
-        expected_markdown(tmp_path, item).parent.mkdir(parents=True, exist_ok=True)
-        expected_markdown(tmp_path, item).write_text(body, encoding="utf-8")
-
-    removed = requeue_outdated_conversions(tmp_path, [empty, wrapper, short])
-
-    assert removed == [
-        expected_markdown(tmp_path, empty),
-        expected_markdown(tmp_path, wrapper),
-    ]
-    assert infer_backlog([empty, wrapper, short], tmp_path).pending == (empty, wrapper)
+    assert requeue_outdated_conversions(tmp_path, [stub, garbled]) == []
+    assert expected_markdown(tmp_path, stub).exists()
+    assert expected_markdown(tmp_path, garbled).exists()
 
 
 def test_requeue_outdated_conversions_removes_only_outdated_papers(

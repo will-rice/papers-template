@@ -942,7 +942,7 @@ def is_garbled(markdown: str) -> bool:
 
 
 def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Path]:
-    """Delete outdated, bodyless or garbled conversions for the next nightly.
+    """Delete outdated conversions so the next nightly run redoes them.
 
     Args:
         root: Repository root.
@@ -957,11 +957,7 @@ def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Pa
         if not markdown.exists():
             continue
         text = markdown.read_text(encoding="utf-8")
-        if (
-            not has_real_body(text)
-            or is_garbled(text)
-            or any(pattern.search(text) for pattern in _OUTDATED_CONVERSION)
-        ):
+        if any(pattern.search(text) for pattern in _OUTDATED_CONVERSION):
             markdown.unlink()
             shutil.rmtree(expected_figures(root, paper), ignore_errors=True)
             removed.append(markdown)
