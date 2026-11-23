@@ -203,6 +203,9 @@ The workflow also runs after every completed `Nightly papers` workflow,
 including safe partial runs that commit inventory before a later conversion
 failure. It saves every inventory paper and removes every paper that was once
 in `papers.csv` but has since been dropped, found in the file's git history.
+Papers arXiv has withdrawn stay in `papers.csv` but are removed from the
+collection; only papers with a fixme marker are checked, and while arXiv is
+unreachable those papers are neither saved nor removed.
 Both steps are idempotent. Papers added to the collection by hand, which were
 never in the inventory, are left alone.
 
