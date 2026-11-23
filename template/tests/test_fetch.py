@@ -846,9 +846,10 @@ async def test_incomplete_forward_window_keeps_the_last_success(
 
 
 @pytest.mark.asyncio
-async def test_failed_backfill_does_not_record_the_discarded_forward_window() -> None:
+async def test_failed_backfill_keeps_the_forward_result() -> None:
     config = backfill_config(date(2000, 1, 1))
     last_success = NOW - timedelta(days=30)
+    history = BackfillProgress(covered_from=NOW - timedelta(days=90))
 
     @dataclass
     class ForwardThenFailing(RecordingAdapter):
@@ -862,20 +863,29 @@ async def test_failed_backfill_does_not_record_the_discarded_forward_window() ->
             if self.windows:
                 raise SourceUnavailableError("request retries exhausted")
             self.windows.append(window)
-            return page(source_record("arxiv", "discarded"))
+            return page(kept)
 
+    kept = source_record("arxiv", "kept")
     factory, _, _ = client_factory(config.fetch)
 
     result = await fetch_all(
         config,
-        PipelineState(fetched_through={"arxiv": last_success}),
+        PipelineState(
+            fetched_through={"arxiv": last_success}, backfill={"arxiv": history}
+        ),
         {"arxiv": ForwardThenFailing("arxiv")},
         factory,
         NOW,
     )
 
-    assert result.records == ()
-    assert result.state.fetched_through == {"arxiv": last_success}
+    assert result.records == (kept,)
+    assert result.state.fetched_through == {"arxiv": NOW}
+    assert result.state.backfill == {"arxiv": history}
+    assert result.stats[0].complete is True
+    assert (
+        "arxiv: backfill unavailable this run: request retries exhausted"
+        in result.events
+    )
 
 
 def papers_with_code_walk(request: httpx.Request) -> httpx.Response:

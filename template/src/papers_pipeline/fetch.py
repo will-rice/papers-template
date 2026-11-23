@@ -130,14 +130,21 @@ async def fetch_all(
                     max_pages=adapter_config.max_pages,
                     max_results=adapter_config.max_results,
                 )
-                history = await _backfill(
-                    adapter,
-                    config,
-                    adapter_index,
-                    backfill.get(adapter.name),
-                    window.start,
-                    client,
-                )
+                history: _BackfillFetch | None = None
+                try:
+                    history = await _backfill(
+                        adapter,
+                        config,
+                        adapter_index,
+                        backfill.get(adapter.name),
+                        window.start,
+                        client,
+                    )
+                except SourceUnavailableError as error:
+                    # The forward result stands; backfill progress stays put.
+                    events.append(
+                        f"{adapter.name}: backfill unavailable this run: {error}"
+                    )
                 events.extend(_prefix_events(adapter.name, client.events))
         except SourceUnavailableError as error:
             # One source's outage should not stop the others or conversion;
