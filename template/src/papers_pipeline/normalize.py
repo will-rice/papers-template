@@ -1,5 +1,6 @@
+from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 import unicodedata
 
@@ -56,7 +57,67 @@ def normalize(record: SourceRecord) -> Paper:
     )
 
 
-def deduplicate(papers: Iterable[Paper]) -> list[Paper]:
+def deduplicate(
+    papers: Iterable[Paper], *, inventory: Iterable[Paper] = ()
+) -> list[Paper]:
+    """Merge reports of one paper, keeping every inventory row's identifier.
+
+    File names and failure history are keyed by identifier, so a row in the
+    inventory is never renamed and never merged into another row. Reports that
+    match a row enrich it; the rest become new papers.
+
+    Args:
+        papers: Freshly fetched papers.
+        inventory: Papers already stored in the inventory.
+
+    Returns:
+        The inventory rows and new papers, in output order.
+    """
+    rows = [
+        _Cluster(
+            paper=paper,
+            strong_keys=_strong_keys(paper),
+            bibliographic_keys={_bibliographic_key(paper)},
+        )
+        for paper in sorted(inventory, key=_preference_key)
+    ]
+    strong_index: dict[str, int] = {}
+    bibliographic_index: defaultdict[str, list[int]] = defaultdict(list)
+    for row_id, row in enumerate(rows):
+        for strong_key in row.strong_keys:
+            strong_index.setdefault(strong_key, row_id)
+        for bibliographic_key in row.bibliographic_keys:
+            bibliographic_index[bibliographic_key].append(row_id)
+
+    new_papers: list[Paper] = []
+    for report in sorted(
+        _cluster_reports(papers), key=lambda cluster: _preference_key(cluster.paper)
+    ):
+        matches = {
+            strong_index[key] for key in report.strong_keys if key in strong_index
+        } | {
+            row_id
+            for key in report.bibliographic_keys
+            for row_id in bibliographic_index.get(key, ())
+            if _can_merge_bibliographically(
+                report.strong_keys, rows[row_id].strong_keys
+            )
+        }
+        if not matches:
+            new_papers.append(report.paper)
+            continue
+        row_id = min(matches)
+        row = rows[row_id]
+        enriched = _merge_clusters(row, report).paper
+        rows[row_id] = replace(
+            row,
+            paper=enriched.model_copy(update={"identifier": row.paper.identifier}),
+        )
+
+    return sorted([*(row.paper for row in rows), *new_papers], key=_output_key)
+
+
+def _cluster_reports(papers: Iterable[Paper]) -> list[_Cluster]:
     clusters: dict[int, _Cluster] = {}
     strong_index: dict[str, int] = {}
     bibliographic_index: dict[str, int] = {}
@@ -104,7 +165,7 @@ def deduplicate(papers: Iterable[Paper]) -> list[Paper]:
 
         _reindex(strong_index, bibliographic_index, clusters)
 
-    return sorted((cluster.paper for cluster in clusters.values()), key=_output_key)
+    return list(clusters.values())
 
 
 def _merge_clusters(left: _Cluster, right: _Cluster) -> _Cluster:
@@ -191,8 +252,8 @@ def _strong_keys(paper: Paper) -> set[str]:
     arxiv_id = _canonical_arxiv_id(paper.arxiv_id)
     doi = _canonical_doi(paper.doi)
     if arxiv_id:
-        # Versions of one arXiv paper are the same paper; the preferred
-        # (lexicographically first) identifier is kept, so file names are stable.
+        # Versions of one arXiv paper are the same paper; deduplicate keeps the
+        # inventory's identifier for it, so file names are stable.
         keys.add(f"arxiv:{re.sub(r'v\d+$', '', arxiv_id)}")
     if doi:
         keys.add(f"doi:{doi}")

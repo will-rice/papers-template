@@ -1,3 +1,4 @@
+import itertools
 import subprocess
 import sys
 from pathlib import Path
@@ -202,6 +203,75 @@ def test_deduplicate_source_precedence_is_order_independent(
 
     assert deduplicate([semantic, dblp]) == [semantic]
     assert deduplicate([dblp, semantic]) == [semantic]
+
+
+def test_deduplicate_keeps_inventory_identifier_and_enriches_the_row(
+    source_record: SourceRecord,
+) -> None:
+    stored = normalize(
+        source_record.model_copy(update={"source": "dblp", "doi": "10.1000/abc"})
+    )
+    reported = normalize(
+        source_record.model_copy(
+            update={"source": "arxiv", "doi": "10.1000/abc", "arxiv_id": "2401.1v2"}
+        )
+    )
+
+    [paper] = deduplicate([reported], inventory=[stored])
+
+    assert paper.identifier == stored.identifier
+    assert paper.arxiv_id == "2401.1v2"
+    assert deduplicate([reported], inventory=[paper]) == [paper]
+
+
+def test_deduplicate_never_merges_two_inventory_rows(
+    source_record: SourceRecord,
+) -> None:
+    by_arxiv = normalize(
+        source_record.model_copy(update={"source": "arxiv", "arxiv_id": "2401.1"})
+    )
+    by_doi = normalize(
+        source_record.model_copy(
+            update={"source": "crossref", "doi": "10.1000/abc", "title": "Other"}
+        )
+    )
+    bridge = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "arxiv_id": "2401.1",
+                "doi": "10.1000/abc",
+            }
+        )
+    )
+
+    merged = deduplicate([bridge], inventory=[by_doi, by_arxiv])
+
+    assert {paper.identifier for paper in merged} == {
+        by_arxiv.identifier,
+        by_doi.identifier,
+    }
+
+
+def test_deduplicate_gives_a_new_paper_one_identifier_in_any_source_order(
+    source_record: SourceRecord,
+) -> None:
+    reports = [
+        normalize(
+            source_record.model_copy(update={"source": source, "arxiv_id": arxiv_id})
+        )
+        for source, arxiv_id in (
+            ("arxiv", "2401.1v10"),
+            ("arxiv", "2401.1v9"),
+            ("semantic_scholar", "2401.1"),
+            ("dblp", "2401.1v1"),
+        )
+    ]
+
+    results = [deduplicate(order) for order in itertools.permutations(reports)]
+
+    assert all(result == results[0] for result in results)
+    assert [paper.identifier for paper in results[0]] == ["arxiv:2401.1v10"]
 
 
 def test_declarative_gate_reports_exclusion(

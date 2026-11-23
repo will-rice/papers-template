@@ -116,7 +116,7 @@ async def run_nightly(
             normalized = [normalize(record) for record in fetched.records]
             accepted = [paper for paper in normalized if gate(paper).accepted]
             previous_inventory = read_inventory(paths.inventory)
-            inventory = deduplicate([*previous_inventory, *accepted])
+            inventory = deduplicate(accepted, inventory=previous_inventory)
             _record_source_results(
                 summary,
                 fetched=fetched,

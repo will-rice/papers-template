@@ -23,6 +23,7 @@ from papers_pipeline.errors import (
 from papers_pipeline.git import GitRepository
 from papers_pipeline.config import FetchConfig
 from papers_pipeline.http import RequestClient
+from papers_pipeline.inventory import read_inventory
 from papers_pipeline.models import SourceRecord
 from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
 from papers_pipeline.state import load_state
@@ -587,6 +588,47 @@ async def test_no_changes_produce_no_inventory_or_batch_commit(tmp_path: Path) -
     assert second_git.messages == []
     assert summary.generated == 1
     assert summary.pending == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_source", "stored", "reported"),
+    [
+        ("semantic_scholar", "2603.04304", "2603.04304v1"),
+        ("arxiv", "2603.04304v9", "2603.04304v10"),
+    ],
+)
+async def test_paper_reported_under_another_version_is_not_reconverted(
+    tmp_path: Path, stored_source: str, stored: str, reported: str
+) -> None:
+    paths = make_paths(tmp_path)
+    paper = record("versioned")
+    await run_nightly(
+        paths,
+        dependencies(
+            FakeAdapter(
+                [paper.model_copy(update={"source": stored_source, "arxiv_id": stored})]
+            ),
+            FakeRunner(),
+            RecordingGit(),
+        ),
+    )
+    markdown = sorted((tmp_path / "papers").glob("*.md"))
+
+    summary = await run_nightly(
+        paths,
+        dependencies(
+            FakeAdapter([paper.model_copy(update={"arxiv_id": reported})]),
+            FakeRunner(),
+            RecordingGit(),
+        ),
+    )
+
+    assert [row.identifier for row in read_inventory(paths.inventory)] == [
+        f"arxiv:{stored}"
+    ]
+    assert summary.attempted == 0
+    assert sorted((tmp_path / "papers").glob("*.md")) == markdown
 
 
 @pytest.mark.asyncio
