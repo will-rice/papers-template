@@ -5,11 +5,13 @@ import socket
 import ssl
 from dataclasses import dataclass
 from typing import Protocol, cast
-from urllib.parse import SplitResult, urljoin, urlsplit
+from urllib.parse import SplitResult, quote, urljoin, urlsplit
 
 from papers_pipeline.errors import PaperError, RateLimitedError
 
 MAX_REDIRECTS = 5
+# RFC 3986 reserved characters and "%", so an already encoded URL is unchanged.
+URL_SAFE_CHARACTERS = "%:/?#[]@!$&'()*+,;="
 
 
 @dataclass(frozen=True)
@@ -109,8 +111,13 @@ class PinnedHttpConnector:
                 },
             )
             response = connection.getresponse()
+            location = response.getheader("Location")
             return HttpResponse(
-                response.status, response.read(), response.getheader("Location")
+                response.status,
+                response.read(),
+                # http.client decodes headers as Latin-1, which keeps the raw bytes.
+                location
+                and quote(location.encode("latin-1"), safe=URL_SAFE_CHARACTERS),
             )
         finally:
             connection.close()
@@ -192,6 +199,7 @@ class RemoteDownloader:
         target = parts.path or "/"
         if parts.query:
             target = f"{target}?{parts.query}"
+        target = quote(target, safe=URL_SAFE_CHARACTERS, errors="surrogatepass")
         try:
             return await self._connector.get(
                 scheme=parts.scheme,
@@ -202,7 +210,7 @@ class RemoteDownloader:
                 tls_server_name=host if parts.scheme == "https" else None,
                 timeout=timeout,
             )
-        except (OSError, http.client.HTTPException) as error:
+        except (OSError, http.client.HTTPException, UnicodeError) as error:
             raise PaperError(f"conversion input network failure: {url}") from error
 
 

@@ -1,13 +1,16 @@
 import asyncio
 import base64
+import http.server
 import io
 import itertools
 import os
 import subprocess
 import sys
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urlsplit
 
 import pypandoc
@@ -38,7 +41,11 @@ from papers_pipeline import convert
 from papers_pipeline.errors import InfrastructureError, PaperError, RateLimitedError
 from papers_pipeline.http import RequestClient
 from papers_pipeline.models import FailureAttempt, InputFormat, Paper, PipelineState
-from papers_pipeline.remote import HttpResponse, RemoteDownloader
+from papers_pipeline.remote import (
+    HttpResponse,
+    PinnedHttpConnector,
+    RemoteDownloader,
+)
 
 NOW = datetime(2026, 9, 23, 2, 0, tzinfo=timezone.utc)
 FIXTURES = Path(__file__).parent / "fixtures" / "conversion"
@@ -729,6 +736,84 @@ class FakeConnector:
         if self.error is not None:
             raise self.error
         return self.responses[min(len(self.calls), len(self.responses)) - 1]
+
+
+class _LoopbackConnector:
+    """Run the real HTTP connector against a local server, whatever was resolved."""
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+
+    async def get(
+        self,
+        *,
+        scheme: str,
+        address: str,
+        port: int,
+        target: str,
+        host_header: str,
+        tls_server_name: str | None,
+        timeout: float,
+    ) -> HttpResponse:
+        return await PinnedHttpConnector().get(
+            scheme="http",
+            address="127.0.0.1",
+            port=self.port,
+            target=target,
+            host_header=host_header,
+            tls_server_name=None,
+            timeout=timeout,
+        )
+
+
+class _NonAsciiUrlHandler(http.server.BaseHTTPRequestHandler):
+    requested: ClassVar[list[str]] = []
+
+    def do_GET(self) -> None:
+        self.requested.append(self.path)
+        if self.path == "/redirect":
+            self.send_response(302)
+            # A raw UTF-8 Location, which http.client decodes as Latin-1.
+            self.send_header("Location", "/caf%C3%A9/ü.pdf".encode().decode("latin-1"))
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", "4")
+        self.end_headers()
+        self.wfile.write(b"%PDF")
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Keep request logs out of the test output."""
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_percent_encodes_non_ascii_urls() -> None:
+    _NonAsciiUrlHandler.requested.clear()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NonAsciiUrlHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        downloader = RemoteDownloader(
+            resolver=FakeResolver(("93.184.216.34",)),
+            connector=_LoopbackConnector(server.server_address[1]),
+        )
+        direct = await downloader.download(
+            "https://public.example/caf%C3%A9/é.pdf?title=ñ&x=%20", 5
+        )
+        redirected = await downloader.download("https://public.example/redirect", 5)
+        with pytest.raises(PaperError, match="network failure"):
+            await downloader.download("https://例え.example/paper.pdf", 5)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert direct == redirected == b"%PDF"
+    assert _NonAsciiUrlHandler.requested == [
+        "/caf%C3%A9/%C3%A9.pdf?title=%C3%B1&x=%20",
+        "/redirect",
+        "/caf%C3%A9/%C3%BC.pdf",
+    ]
 
 
 @pytest.mark.asyncio
