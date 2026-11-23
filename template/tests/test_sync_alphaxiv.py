@@ -173,7 +173,7 @@ def test_stripped_old_style_ids_never_reach_alphaxiv(tmp_path: Path) -> None:
     write_inventory(inventory, "cs/9812006v1", "9608012v1", "2608.00001v1")
 
     current = read_arxiv_ids(inventory)
-    assert current == ["cs/9812006", "2608.00001"]
+    assert current == ["2608.00001", "cs/9812006"]
     assert dropped_arxiv_ids(inventory, current) == []
 
 
@@ -247,13 +247,21 @@ def oai_record(name: str) -> httpx.Response:
 
 async def test_withdrawn_papers_are_removed_and_never_saved(tmp_path: Path) -> None:
     inventory = tmp_path / "papers.csv"
-    write_inventory(inventory, "2401.00001v1", "2412.06581v3", "9405017v1", "2608.1v1")
-    block(inventory, "2401.00001v1", "2412.06581v3", "9405017v1")
+    blocked_ids = (
+        "2401.00001v1",
+        "2401.99999v1",
+        "2412.06581v3",
+        "9405017v1",
+        "cs/9812006v1",
+    )
+    write_inventory(inventory, *blocked_ids, "2608.1v1")
+    block(inventory, *blocked_ids)
     transport, asked = arxiv_oai_stub(
         {
             "2401.00001": oai_record("available"),
             "2412.06581": oai_record("withdrawn"),
-            "9405017": oai_record("unknown_id"),
+            "2401.99999": oai_record("unknown_id"),
+            "cs/9812006": oai_record("available"),
         }
     )
 
@@ -263,12 +271,12 @@ async def test_withdrawn_papers_are_removed_and_never_saved(tmp_path: Path) -> N
         await sync_collection(inventory, COLLECTION, client, blocked)
 
     # Only papers with a fixme marker cost an arXiv request.
-    assert sorted(asked) == ["2401.00001", "2412.06581", "9405017"]
+    assert sorted(asked) == ["2401.00001", "2401.99999", "2412.06581", "cs/9812006"]
     assert blocked == BlockedPapers(frozenset({"2412.06581"}), frozenset())
     assert calls == [
         {
             "folder_id": "folder-0",
-            "paper_ids_or_urls": ["2401.00001", "2608.1", "9405017"],
+            "paper_ids_or_urls": ["2401.00001", "2401.99999", "2608.1", "cs/9812006"],
         },
         {"removed_from": "folder-0", "paper_ids_or_urls": ["2412.06581"]},
     ]

@@ -178,13 +178,16 @@ async def check_blocked_papers(
         The withdrawn papers and those arXiv could not be asked about.
     """
     backlog = infer_backlog(read_inventory(inventory), inventory.parent)
-    identifiers = list(
-        dict.fromkeys(
-            re.sub(r"v\d+$", "", paper.arxiv_id)
-            for paper in backlog.blocked
-            if paper.arxiv_id
-        )
-    )
+    blocked_ids = {
+        re.sub(r"v\d+$", "", paper.arxiv_id)
+        for paper in backlog.blocked
+        if paper.arxiv_id
+    }
+    identifiers = [
+        identifier
+        for identifier in read_arxiv_ids(inventory)
+        if identifier in blocked_ids
+    ]
     withdrawn: set[str] = set()
     deadline = Deadline.start(ARXIV_FETCH.total_deadline_seconds)
     async with RequestClient(
@@ -230,7 +233,7 @@ def is_withdrawn(record: str) -> bool:
 
     Returns:
         True if the latest version has no content; False for an ID arXiv does
-        not know, such as a stored legacy ID without its category.
+        not know.
 
     Raises:
         ValueError: If the response is neither a record nor an unknown ID.
