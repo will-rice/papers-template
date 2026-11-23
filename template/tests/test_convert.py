@@ -1513,7 +1513,7 @@ broken, tool, *args = sys.argv[1:]
 if tool in broken.split(","):
     raise SystemExit(1)
 source = args[1] if tool == "docling" else args[0]
-if "crash" in Path(source).name:
+if "crash" in Path(source).name and "garbled" not in Path(source).name:
     os.kill(os.getpid(), signal.SIGSEGV)
 if "slow" in Path(source).name:
     time.sleep(60)
@@ -1530,6 +1530,11 @@ if tool == "docling":
 else:
     output = Path(next(a for a in args if a.startswith("--output=")).split("=", 1)[1])
 body = "## Abstract\\n" if "stubhtml" in Path(source).name and source.endswith(".html") else "# converted\\n\\nBody text.\\n"
+if "garbled" in Path(source).name and tool == "docling":
+    if "--pdf-backend" not in args:
+        body = "# converted\\n\\nBody \\ufffd\\ufffd text.\\n"
+    elif "crash" in Path(source).name:
+        os.kill(os.getpid(), signal.SIGSEGV)
 output.write_text(body, encoding="utf-8")
 """
 
@@ -2183,6 +2188,39 @@ async def test_output_with_no_body_fails_the_paper(tmp_path: Path) -> None:
     assert [item.paper for item in result.failed] == [stub]
     assert "no body text" in result.state.failures[stub.identifier][0].error
     assert not expected_markdown(tmp_path / "work", stub).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("identifier", "kept"),
+    [("doi:garbled", "Body text."), ("doi:garbled-crash", "Body \ufffd\ufffd text.")],
+)
+async def test_garbled_pdf_output_is_converted_again_with_pdfium(
+    tmp_path: Path, identifier: str, kept: str
+) -> None:
+    target = paper(identifier, input_format="pdf")
+
+    result = await _convert_with_crashes(tmp_path, [target])
+
+    assert [item.paper for item in result.succeeded] == [target]
+    assert kept in expected_markdown(tmp_path / "work", target).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_requeue_outdated_conversions_removes_garbled_papers(tmp_path: Path) -> None:
+    garbled = paper("arxiv:1", input_format="pdf")
+    isolated = paper("arxiv:2", input_format="pdf")
+    for item, body in [
+        (garbled, "text " * 10 + "\ufffd"),
+        (isolated, "text " * 100 + "\ufffd"),
+    ]:
+        expected_markdown(tmp_path, item).parent.mkdir(parents=True, exist_ok=True)
+        expected_markdown(tmp_path, item).write_text(body, encoding="utf-8")
+
+    removed = requeue_outdated_conversions(tmp_path, [garbled, isolated])
+
+    assert removed == [expected_markdown(tmp_path, garbled)]
 
 
 def test_requeue_outdated_conversions_removes_bodyless_papers(tmp_path: Path) -> None:

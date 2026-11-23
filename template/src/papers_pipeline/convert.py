@@ -42,6 +42,13 @@ _PROCESS_SHUTDOWN_TIMEOUT = 2.0
 CONVERSION_MEMORY_LIMIT_BYTES = 8 * 1024**3
 MEMORY_SAMPLE_SECONDS = 1.0
 _DOCLING_TOOL = "docling"
+# docling's default PDF parser writes U+FFFD for glyphs it cannot map, even
+# where pdfium reads them, so garbled output is converted again with pdfium.
+_PDFIUM_BACKEND_ARGS = ("--pdf-backend", "pypdfium2")
+# Share of U+FFFD at which a paper counts as garbled. Of 29 affected files in
+# nine corpora, one lost its prose (2.8%); the rest peak at 0.39%, mostly math
+# symbols. pdfium splits words on some PDFs, so those keep docling's default.
+GARBLED_CHARACTER_SHARE = 0.01
 _PANDOC_TOOL = "pandoc"
 # arXiv renders most papers to HTML with LaTeXML. Converting that article with
 # pandoc takes under a second, while docling spends the better part of a minute
@@ -609,6 +616,27 @@ async def convert_batch(
                         raise InfrastructureError(
                             f"converter reported success without output: {paper.identifier}"
                         )
+                    first_text = produced_markdown.read_text(encoding="utf-8")
+                    if is_garbled(first_text):
+                        pdfium_dir = pdf_output_dir / "pdfium"
+                        pdfium_dir.mkdir()
+                        pdfium_markdown = pdfium_dir / produced_markdown.name
+                        # The first output stands if this attempt fails.
+                        try:
+                            await runner.run(
+                                [
+                                    *command_for(paper, input_path, pdfium_dir),
+                                    *_PDFIUM_BACKEND_ARGS,
+                                ],
+                                timeout=timeout_seconds,
+                            )
+                        except (ConverterCrashError, PaperError):
+                            pass
+                        else:
+                            if pdfium_markdown.exists() and pdfium_markdown.read_text(
+                                encoding="utf-8"
+                            ).count("\ufffd") < first_text.count("\ufffd"):
+                                produced_markdown = pdfium_markdown
                     localize_pdf_figures(
                         produced_markdown, staged_output.with_suffix(".figures")
                     )
@@ -854,8 +882,21 @@ def has_real_body(markdown: str) -> bool:
     return re.search(r"\w", body) is not None
 
 
+def is_garbled(markdown: str) -> bool:
+    """Whether converted markdown has lost a visible share of its characters.
+
+    Args:
+        markdown: Converted paper, with or without front matter.
+
+    Returns:
+        True if U+FFFD makes up at least GARBLED_CHARACTER_SHARE of the body.
+    """
+    body = without_front_matter(markdown)
+    return bool(body) and body.count("\ufffd") / len(body) >= GARBLED_CHARACTER_SHARE
+
+
 def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Path]:
-    """Delete outdated or bodyless conversions so the next nightly redoes them.
+    """Delete outdated, bodyless or garbled conversions for the next nightly.
 
     Args:
         root: Repository root.
@@ -870,8 +911,10 @@ def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Pa
         if not markdown.exists():
             continue
         text = markdown.read_text(encoding="utf-8")
-        if not has_real_body(text) or any(
-            pattern.search(text) for pattern in _OUTDATED_CONVERSION
+        if (
+            not has_real_body(text)
+            or is_garbled(text)
+            or any(pattern.search(text) for pattern in _OUTDATED_CONVERSION)
         ):
             markdown.unlink()
             shutil.rmtree(expected_figures(root, paper), ignore_errors=True)
