@@ -46,7 +46,9 @@ class FailureAttempt(FrozenModel):
 
 
 class SourceContinuation(FrozenModel):
-    cursor: str
+    """Where an unfinished walk resumes; no cursor means a fresh query at the start."""
+
+    cursor: str | None
     window_start: datetime
     window_end: datetime
 

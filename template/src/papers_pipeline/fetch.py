@@ -117,23 +117,36 @@ async def fetch_all(
 
         adapter = adapters[adapter_config.name]
         continuation = continuations.get(adapter.name)
+        recorded = fetched_through.get(adapter.name)
         lookback_start = now - timedelta(days=adapter_config.lookback_days)
-        window = FetchWindow(
-            start=(
-                continuation.window_start
-                if continuation
-                else min(
-                    lookback_start,
-                    fetched_through.get(adapter.name, lookback_start),
-                )
-            ),
-            end=continuation.window_end if continuation else now,
-        )
         starting_cursor = continuation.cursor if continuation else None
+        if continuation is None:
+            start = (
+                lookback_start if recorded is None else min(lookback_start, recorded)
+            )
+            window = FetchWindow(start=start, end=now)
+            walk_end = now
+        elif starting_cursor is None:
+            window = FetchWindow(start=continuation.window_start, end=now)
+            walk_end = now
+        else:
+            window = FetchWindow(
+                start=continuation.window_start, end=continuation.window_end
+            )
+            # A split span ends on a day's last instant; the walk goes on past it.
+            walk_end = now if window.end.time() == time.max else window.end
 
         async with client_factory(deadline) as client:
             forward = await _fetch_forward(
-                adapter, config, adapter_index, window, starting_cursor, client
+                adapter,
+                config,
+                adapter_index,
+                window,
+                walk_end,
+                continuation,
+                recorded,
+                now,
+                client,
             )
             history = (
                 await _backfill(
@@ -159,7 +172,11 @@ async def fetch_all(
         if forward.continuation is not None:
             continuations[adapter.name] = forward.continuation
             if forward.capped:
-                events.append(f"{adapter.name}: cap reached; continuation persisted")
+                events.append(
+                    f"{adapter.name}: cap reached; continuation persisted"
+                    if forward.continuation.cursor is not None
+                    else f"{adapter.name}: cap reached"
+                )
         else:
             continuations.pop(adapter.name, None)
             if forward.complete:
@@ -169,13 +186,20 @@ async def fetch_all(
                     events.append(f"{adapter.name}: fetch complete")
             elif forward.capped:
                 events.append(f"{adapter.name}: cap reached")
-        recorded = fetched_through.get(adapter.name)
-        # A value inside the lookback does not change the next window and stays
-        # a safe lower bound, so rewriting it would only add a state commit.
-        if forward.covered_through is not None and (
-            recorded is None or recorded < min(lookback_start, forward.covered_through)
-        ):
-            fetched_through[adapter.name] = forward.covered_through
+        # An ordinary night leaves a value inside the lookback alone: it is still
+        # a true lower bound and the next window is the same without a state commit.
+        ordinary = (
+            continuation is None
+            and forward.continuation is None
+            and recorded is not None
+            and recorded >= lookback_start
+        )
+        if forward.covered_through is not None and not ordinary:
+            fetched_through[adapter.name] = (
+                forward.covered_through
+                if recorded is None
+                else max(recorded, forward.covered_through)
+            )
 
         source_records = forward.records
         rejected = forward.rejected
@@ -216,14 +240,18 @@ async def _fetch_forward(
     config: PipelineConfig,
     adapter_index: int,
     window: FetchWindow,
-    cursor: str | None,
+    walk_end: datetime,
+    resumed: SourceContinuation | None,
+    recorded: datetime | None,
+    now: datetime,
     client: RequestClient,
 ) -> _ForwardFetch:
-    """Walk a window oldest first, halving any span too dense to page through.
+    """Walk from window.start to walk_end oldest first, halving dense spans.
 
-    Each finished span moves covered_through forward, so a catch-up advances
-    even when it needs many runs. Halving spends no page budget, so a run always
-    reaches a span it can fetch.
+    Everything before the frontier (the later of recorded and the last finished
+    span) has been fetched. A walk stopped short resumes at that frontier, so
+    new days are never queued behind a repeat of the lookback overlap. Halving
+    spends no page budget, so a run always reaches a span it can fetch.
     """
     adapter_config = config.adapters[adapter_index]
     records: list[SourceRecord] = []
@@ -232,11 +260,11 @@ async def _fetch_forward(
     pages_left = adapter_config.max_pages
     results_left = adapter_config.max_results
     span = window
+    cursor = resumed.cursor if resumed else None
     covered_through: datetime | None = None
     truncated = False
-    continuation: SourceContinuation | None = None
     unavailable: SourceUnavailableError | None = None
-    complete = False
+    finished = False
     while True:
         chunk = await _fetch_window(
             adapter,
@@ -253,9 +281,6 @@ async def _fetch_forward(
         error_events.extend(chunk.error_events)
         unavailable = chunk.unavailable
         if chunk.cursor is not None:
-            continuation = SourceContinuation(
-                cursor=chunk.cursor, window_start=span.start, window_end=span.end
-            )
             truncated = truncated or chunk.capped
             break
         if unavailable is not None:
@@ -275,19 +300,39 @@ async def _fetch_forward(
             if span.end.time() == time.max
             else span.end
         )
-        if span.end >= window.end:
-            complete = not truncated
+        if span.end >= walk_end:
+            finished = True
             break
         if pages_left <= 0 or results_left <= 0:
             truncated = True
             break
-        span = FetchWindow(start=covered_through, end=window.end)
+        span = FetchWindow(start=covered_through, end=walk_end)
+
+    frontier = max(
+        (value for value in (recorded, covered_through) if value is not None),
+        default=None,
+    )
+    continuation: SourceContinuation | None
+    if finished:
+        continuation = None
+    elif chunk.cursor is not None and (frontier is None or span.start >= frontier):
+        continuation = SourceContinuation(
+            cursor=chunk.cursor, window_start=span.start, window_end=span.end
+        )
+    elif frontier is None or (unavailable is not None and covered_through is None):
+        # An outage before any progress leaves the saved position as it was.
+        continuation = resumed
+    else:
+        # Stopped inside the overlap or between spans: new days come next.
+        continuation = SourceContinuation(
+            cursor=None, window_start=frontier, window_end=now
+        )
     return _ForwardFetch(
         records=records,
         continuation=continuation,
         covered_through=covered_through,
         capped=truncated,
-        complete=complete,
+        complete=finished and not truncated,
         rejected=rejected,
         error_events=error_events,
         unavailable=unavailable,
