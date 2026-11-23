@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -30,6 +31,7 @@ from papers_pipeline.models import (
     SourceRecord,
 )
 from papers_pipeline.fetch import fetch_all
+from papers_pipeline.state import load_state, save_state
 
 NOW = datetime(2026, 9, 23, 18, 29, 6, tzinfo=timezone.utc)
 
@@ -1121,6 +1123,139 @@ async def test_dense_backfill_chunk_moves_back_without_a_gap() -> None:
     ids = {record.source_id for record in result.records}
     assert {(first_day + timedelta(days=n)).isoformat() for n in range(40)} <= ids
     assert result.state.backfill["arxiv"].continuation is None
+
+
+@pytest.mark.asyncio
+async def test_dense_source_reaches_new_days_without_a_standing_lag() -> None:
+    config = pipeline_config(
+        adapter_config("arxiv", lookback_days=7, max_pages=2, max_results=100)
+    )
+    nights = [NOW + timedelta(days=night) for night in range(15)]
+    adapter = DayTableAdapter(
+        "arxiv",
+        one_paper_per_day_table(
+            "arxiv", (NOW - timedelta(days=7)).date(), nights[-1].date()
+        ),
+    )
+    factory, _, _ = client_factory(config.fetch)
+    state = PipelineState()
+    first_seen: dict[str, date] = {}
+    completed = 0
+    for run_at in nights:
+        result = await fetch_all(config, state, {"arxiv": adapter}, factory, run_at)
+        state = result.state
+        completed += result.stats[0].complete
+        for record in result.records:
+            first_seen.setdefault(record.source_id, run_at.date())
+
+    assert completed > 0
+    # The initial lookback takes a few nights; after that a day waits at most one.
+    for run_at in nights[4:-1]:
+        day = run_at.date()
+        assert (first_seen[day.isoformat()] - day).days <= 1
+
+
+@pytest.mark.asyncio
+async def test_stop_inside_the_overlap_resumes_at_the_frontier() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7, max_pages=1))
+    recorded = NOW - timedelta(days=2)
+    adapter = RecordingAdapter("arxiv", pages=[page(next_cursor="overlap"), page()])
+    factory, _, _ = client_factory(config.fetch)
+
+    stopped = await fetch_all(
+        config,
+        PipelineState(fetched_through={"arxiv": recorded}),
+        {"arxiv": adapter},
+        factory,
+        NOW,
+    )
+    later = NOW + timedelta(days=1)
+    resumed = await fetch_all(config, stopped.state, {"arxiv": adapter}, factory, later)
+
+    assert stopped.state.fetched_through == {"arxiv": recorded}
+    assert adapter.windows[1] == FetchWindow(start=recorded, end=later)
+    assert adapter.cursors[1] is None
+    assert resumed.state.continuations == {}
+    assert resumed.state.fetched_through == {"arxiv": later}
+
+
+@pytest.mark.asyncio
+async def test_outage_between_spans_resumes_where_the_walk_stopped() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7))
+
+    @dataclass
+    class SplitThenFailing(RecordingAdapter):
+        async def fetch(
+            self,
+            window: FetchWindow,
+            cursor: str | None,
+            client: RequestClient,
+            config: AdapterConfig,
+        ) -> FetchPage:
+            self.windows.append(window)
+            if len(self.windows) == 1:
+                return FetchPage(records=(), next_cursor=None, capped=True)
+            if len(self.windows) == 2:
+                return page()
+            raise SourceUnavailableError("request retries exhausted")
+
+    adapter = SplitThenFailing("arxiv")
+    factory, _, _ = client_factory(config.fetch)
+
+    result = await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
+
+    stopped_at = adapter.windows[2].start
+    assert result.state.fetched_through == {"arxiv": stopped_at}
+    assert result.state.continuations == {
+        "arxiv": SourceContinuation(
+            cursor=None, window_start=stopped_at, window_end=NOW
+        )
+    }
+
+
+@pytest.mark.asyncio
+async def test_split_span_saved_by_an_earlier_version_walks_on_to_now() -> None:
+    config = pipeline_config(adapter_config("arxiv", lookback_days=7))
+    span_end = datetime.combine(
+        (NOW - timedelta(days=3)).date(), time.max, tzinfo=timezone.utc
+    )
+    saved = SourceContinuation(
+        cursor="resume", window_start=NOW - timedelta(days=7), window_end=span_end
+    )
+    adapter = RecordingAdapter("arxiv", pages=[page(), page()])
+    factory, _, _ = client_factory(config.fetch)
+
+    result = await fetch_all(
+        config,
+        PipelineState(continuations={"arxiv": saved}),
+        {"arxiv": adapter},
+        factory,
+        NOW,
+    )
+
+    assert adapter.windows[1] == FetchWindow(
+        start=span_end + timedelta(microseconds=1), end=NOW
+    )
+    assert result.state.continuations == {}
+    assert result.state.fetched_through == {"arxiv": NOW}
+    assert result.stats[0].complete is True
+
+
+def test_cursorless_continuation_round_trips_through_the_state_file(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".papers-state.yml"
+    state = PipelineState(
+        continuations={
+            "arxiv": SourceContinuation(
+                cursor=None, window_start=NOW - timedelta(days=1), window_end=NOW
+            )
+        }
+    )
+
+    save_state(path, state)
+
+    assert load_state(path).continuations == state.continuations
 
 
 @pytest.mark.asyncio

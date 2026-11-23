@@ -21,7 +21,8 @@ adapters, normalizes and deduplicates them, applies topic gates, reconciles the
 inventory with the corpus, selects deterministic budgeted batches, converts
 inputs, formats changed files, updates the index, and commits each consistent
 stage. Source continuations retain an opaque cursor and its exact UTC fetch
-window across bounded runs under one shared deadline. Conversion failures are
+window, or the time to resume from, across bounded runs under one shared
+deadline. Conversion failures are
 isolated by paper; infrastructure failures stop the run.
 
 The corpus is built to be browsed by people and LLMs. [llms.txt](llms.txt)
