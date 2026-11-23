@@ -2173,6 +2173,11 @@ def test_docling_figures_move_next_to_the_paper_and_are_relinked(
         ("## Abstract\n\nA two sentence note. It is short.\n", True),
         ("See pages 3 of the appendix for the proof.\n", True),
         ("See pages 1-2 of [a.pdf](https://a.pdf)\n\nReal text.\n", True),
+        ("<!-- image -->\n", False),
+        ("## Abstract\n\n<!-- formula-not-decoded -->\n", False),
+        ("## Results\n\n![Refer to\ncaption](a.figures/figure-1.webp)\n", False),
+        ("##\nReal body line\n", True),
+        ("<!-- image -->\n\nFigure 1: A caption.\n", True),
     ],
 )
 def test_has_real_body(markdown: str, expected: bool) -> None:
@@ -2193,7 +2198,10 @@ async def test_output_with_no_body_fails_the_paper(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("identifier", "kept"),
-    [("doi:garbled", "Body text."), ("doi:garbled-crash", "Body \ufffd\ufffd text.")],
+    [
+        ("doi:garbled", "Body text."),
+        ("doi:garbled-crash", "Body \ufffd\ufffd text."),
+    ],
 )
 async def test_garbled_pdf_output_is_converted_again_with_pdfium(
     tmp_path: Path, identifier: str, kept: str

@@ -109,9 +109,13 @@ _PROBE_HTML = "<p>Conversion probe</p>"
 # Lines that carry no paper text: headings, and the note LaTeXML leaves for a
 # paper that only includes a PDF ("See pages 1-last of [x.pdf](https://x.pdf)").
 _NON_BODY_LINE = re.compile(
-    r"^(?:#{1,6}\s.*|See pages [^\n]*? of \[[^\]\n]*\.pdf\]\([^)\n]*\))\s*$",
+    r"^(?:#{1,6}(?:[ \t].*)?|See pages [^\n]*? of \[[^\]\n]*\.pdf\]\([^)\n]*\))"
+    r"[ \t]*$",
     re.MULTILINE,
 )
+# Markup that carries no paper text: docling's placeholders, such as
+# "<!-- image -->", and image links, whose alt text pandoc may wrap over lines.
+_NON_BODY_MARKUP = re.compile(r"<!--.*?-->|!\[[^\]]*\]\([^)\n]*\)", re.DOTALL)
 
 
 class CommandRunner:
@@ -876,10 +880,17 @@ def has_real_body(markdown: str) -> bool:
 
     Returns:
         False for empty output, headings alone (such as a lone "## Abstract"),
-        or a LaTeXML article that only wraps a PDF include.
+        image links or docling placeholders alone, or a LaTeXML article that
+        only wraps a PDF include.
     """
-    body = _NON_BODY_LINE.sub("", without_front_matter(markdown))
-    return re.search(r"\w", body) is not None
+    return re.search(r"\w", _body_text(markdown)) is not None
+
+
+def _body_text(markdown: str) -> str:
+    """Return converted markdown without front matter, markup and headings."""
+    return _NON_BODY_LINE.sub(
+        "", _NON_BODY_MARKUP.sub("", without_front_matter(markdown))
+    )
 
 
 def is_garbled(markdown: str) -> bool:
