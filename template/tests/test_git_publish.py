@@ -69,6 +69,23 @@ def test_publish_reports_an_unavailable_remote_and_keeps_commits(
     assert git(work, "rev-parse", "HEAD") == batch
 
 
+def test_publish_reports_a_rebase_that_never_started(
+    origin: Path, tmp_path: Path
+) -> None:
+    work = clone(origin, tmp_path / "work")
+    other = clone(origin, tmp_path / "other")
+    commit(other, "incoming.txt", "theirs\n")
+    git(other, "push", "-q", "origin", "main")
+    batch = commit(work, "papers.csv", "initial\nbatch\n")
+    # Git refuses to start a rebase that would overwrite this untracked file.
+    (work / "incoming.txt").write_text("untracked\n", encoding="utf-8")
+
+    assert not GitRepository(work).publish()
+
+    assert git(work, "rev-parse", "HEAD") == batch
+    assert (work / "incoming.txt").read_text(encoding="utf-8") == "untracked\n"
+
+
 def test_publish_aborts_a_conflicting_rebase(origin: Path, tmp_path: Path) -> None:
     work = clone(origin, tmp_path / "work")
     other = clone(origin, tmp_path / "other")
