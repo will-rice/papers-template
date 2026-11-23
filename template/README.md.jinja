@@ -143,9 +143,9 @@ creates a colocated `.fixme.txt`; fix the input and remove the marker to retry.
 A converter whose process tree grows past 8 GiB of resident memory is stopped
 and fails that paper, so one oversized document cannot exhaust the runner.
 A converter crash also counts against that paper and keeps successful peers.
-If every paper in a batch of two or more crashes, the run aborts with no
-strikes. A lone crash strikes the paper only if the converter then handles a
-known-good document.
+Unless another paper in the batch succeeded with that converter, the crash
+strikes the paper only if the converter then handles a known-good document;
+otherwise the run aborts with no strikes. A missing tool aborts immediately.
 Any failure downloading one paper's input (HTTP errors, DNS, connection
 failures, timeouts, invalid URLs) counts toward that paper's failure history
 without cancelling peers. HTTP 429 is the exception: the paper is deferred

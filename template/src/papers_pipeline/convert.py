@@ -92,14 +92,6 @@ _DOCUMENT_FAILURE_PATTERNS = (
     ),
     re.compile(r"\bnot\s+a\s+(?:valid\s+)?pdf\b", re.IGNORECASE),
 )
-# Output naming the machine rather than the document. These abort the run, so
-# no paper takes a strike for them.
-_ENVIRONMENT_FAILURE_PATTERN = re.compile(
-    r"\bout of memory\b|\bno space left on device\b"
-    r"|\b(?:failed to initialize|error loading) model\b|\bnot writable\b"
-    r"|\bshared (?:library|object)\b",
-    re.IGNORECASE,
-)
 # POSIX shell exits for a command that cannot run or does not exist.
 _TOOL_UNAVAILABLE_EXITS = {126, 127}
 # Crash output is saved in the state file and fixme markers.
@@ -201,10 +193,7 @@ class CommandRunner:
             )
             if _is_document_failure(completed.returncode, output):
                 raise PaperError(message) from process_error
-            if (
-                completed.returncode in _TOOL_UNAVAILABLE_EXITS
-                or _ENVIRONMENT_FAILURE_PATTERN.search(output)
-            ):
+            if completed.returncode in _TOOL_UNAVAILABLE_EXITS:
                 raise InfrastructureError(
                     f"conversion infrastructure failure: {message}"
                 ) from process_error
@@ -715,14 +704,9 @@ async def convert_batch(
                     ) from error
 
         crashed = [result for result in results if result.crashed]
-        ran = [r for r in results if not r.deferred and not r.needs_pdf]
-        if len(crashed) > 1 and len(crashed) == len(ran):
-            raise InfrastructureError(
-                f"every conversion in the batch crashed: {crashed[0].error}"
-            )
         # A success proves only its own converter: pandoc working says nothing
         # about docling. Any other converter that crashed must pass a probe, so
-        # a broken install cannot strike papers one small batch at a time.
+        # a broken install cannot strike papers, however many crashed.
         proven = {r.tool for r in results if r.staged_output is not None}
         for tool in sorted({result.tool for result in crashed} - proven):
             tool_crashes = [result for result in crashed if result.tool == tool]

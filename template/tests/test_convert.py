@@ -409,18 +409,15 @@ async def test_command_runner_reports_termination_exits_as_crashes(
         ("libcudnn.so: cannot open shared object file", "stderr"),
     ],
 )
-async def test_command_runner_fails_safe_for_infrastructure_errors(
+async def test_command_runner_leaves_environment_messages_to_the_probe(
     message: str,
     stream: str,
 ) -> None:
     destination = "" if stream == "stdout" else ", file=sys.stderr"
     script = f"import sys; print({message!r}{destination}); raise SystemExit(1)"
 
-    with pytest.raises(
-        InfrastructureError, match="conversion infrastructure failure"
-    ) as exc_info:
+    with pytest.raises(ConverterCrashError, match="converter crashed"):
         await CommandRunner().run([sys.executable, "-c", script], timeout=5)
-    assert not isinstance(exc_info.value, ConverterCrashError)
 
 
 @pytest.mark.asyncio
@@ -1519,6 +1516,9 @@ if "crash" in Path(source).name:
     os.kill(os.getpid(), signal.SIGSEGV)
 if "slow" in Path(source).name:
     time.sleep(60)
+if "oom" in Path(source).name:
+    print("CUDA out of memory", file=sys.stderr)
+    raise SystemExit(1)
 if tool == "docling":
     output = Path(args[args.index("--output") + 1]) / f"{Path(source).stem}.md"
 else:
@@ -1601,18 +1601,44 @@ async def test_third_crash_writes_fixme_so_the_queue_moves_on(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_batch_where_every_paper_crashes_aborts_without_strikes(
-    tmp_path: Path,
+@pytest.mark.parametrize("poison", ["crash", "oom"])
+async def test_all_crash_batch_strikes_papers_when_the_probe_passes(
+    tmp_path: Path, poison: str
 ) -> None:
     papers = [
-        paper("doi:crash-1", input_format="html"),
-        paper("doi:crash-2", input_format="html"),
+        paper(f"doi:{poison}-1", input_format="html"),
+        paper(f"doi:{poison}-2", input_format="html"),
     ]
 
-    with pytest.raises(InfrastructureError, match="every conversion in the batch"):
-        await _convert_with_crashes(tmp_path, papers)
+    result = await _convert_with_crashes(tmp_path, papers)
+
+    assert {item.paper for item in result.failed} == set(papers)
+    assert set(result.state.failures) == {item.identifier for item in papers}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("poison", ["crash", "oom"])
+async def test_all_crash_batch_aborts_without_strikes_when_the_probe_fails(
+    tmp_path: Path, poison: str
+) -> None:
+    papers = [
+        paper(f"doi:{poison}-1", input_format="html"),
+        paper(f"doi:{poison}-2", input_format="html"),
+    ]
+
+    with pytest.raises(InfrastructureError, match="known-good document"):
+        await _convert_with_crashes(tmp_path, papers, broken=["pandoc"])
 
     assert infer_backlog(papers, tmp_path / "work").pending == tuple(papers)
+
+
+@pytest.mark.asyncio
+async def test_lone_out_of_memory_output_strikes_the_paper(tmp_path: Path) -> None:
+    poison = paper("doi:oom", input_format="html")
+
+    result = await _convert_with_crashes(tmp_path, [poison])
+
+    assert [item.paper for item in result.failed] == [poison]
 
 
 @pytest.mark.asyncio
