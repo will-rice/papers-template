@@ -4,10 +4,12 @@ import http.server
 import io
 import itertools
 import os
+import struct
 import subprocess
 import sys
 import threading
 import time
+import zlib
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1934,6 +1936,17 @@ def png(width: int, height: int) -> bytes:
     return buffer.getvalue()
 
 
+def _png_with_chunks(*chunks: tuple[bytes, bytes]) -> bytes:
+    """Build a PNG from raw chunks with valid checksums."""
+    return b"\x89PNG\r\n\x1a\n" + b"".join(
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data))
+        for kind, data in chunks
+    )
+
+
 @pytest.mark.asyncio
 async def test_arxiv_html_figures_are_stored_next_to_the_paper_as_webp(
     tmp_path: Path, state: PipelineState
@@ -1994,14 +2007,28 @@ def test_arxiv_lua_filter_writes_equations_as_display_math(tmp_path: Path) -> No
     [
         b"<svg xmlns='http://www.w3.org/2000/svg'/>",  # not a raster image
         png(64, 64)[:-40],  # truncated download
+        _png_with_chunks((b"IHDR", b"\x00" * 5)),  # Pillow raises ValueError
+        _png_with_chunks(  # Pillow raises SyntaxError
+            (b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0)),
+            (b"IDAT", zlib.compress(b"\x00" * 200)[:6]),
+            (b"\x00\x01\x02\x03", b""),
+        ),
     ],
-    ids=["svg", "truncated"],
+    ids=["svg", "truncated", "value-error", "syntax-error"],
 )
 def test_undecodable_figures_are_skipped(tmp_path: Path, payload: bytes) -> None:
     target = tmp_path / "paper.figures" / "figure-1.webp"
 
     assert not write_figure(payload, target)
     assert not target.exists()
+
+
+def test_failed_figure_write_stops_the_run(tmp_path: Path) -> None:
+    blocked = tmp_path / "paper.figures"
+    blocked.write_text("a file where the directory belongs", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        write_figure(png(8, 8), blocked / "figure-1.webp")
 
 
 def test_inline_data_figures_are_written_next_to_the_paper(tmp_path: Path) -> None:

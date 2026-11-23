@@ -865,8 +865,16 @@ def write_figure(payload: bytes, path: Path) -> bool:
     try:
         image = Image.open(BytesIO(payload))
         image.load()
-    # UnidentifiedImageError and truncation are both OSErrors.
-    except (OSError, Image.DecompressionBombError):
+    # UnidentifiedImageError and truncation are both OSErrors. Corrupt headers
+    # raise the others: ValueError and SyntaxError from PNG, OverflowError from
+    # JPEG 2000.
+    except (
+        OSError,
+        ValueError,
+        SyntaxError,
+        OverflowError,
+        Image.DecompressionBombError,
+    ):
         return False
     with image:
         image.thumbnail((FIGURE_MAX_PIXELS, FIGURE_MAX_PIXELS))
