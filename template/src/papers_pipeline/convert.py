@@ -351,7 +351,10 @@ class DownloadingMaterializer:
         return target
 
     async def download(self, url: str) -> bytes:
-        host = urlsplit(url).hostname or ""
+        try:
+            host = urlsplit(url).hostname or ""
+        except ValueError as error:
+            raise PaperError(f"invalid conversion input URL: {url}") from error
         interval = self._min_interval_seconds.get(host, 0.0)
         attempts = self._rate_limit_attempts.get(host, 1)
         async with self._host_locks.setdefault(host, asyncio.Lock()):
@@ -534,9 +537,12 @@ async def convert_batch(
                 continue
             target = figures / f"figure-{len(local) + 1}.webp"
             try:
-                payload = await materializer.download(
-                    urljoin(page_url, source.group(1))
-                )
+                figure_url = urljoin(page_url, source.group(1))
+            except ValueError:
+                local[source.group(1)] = None
+                continue
+            try:
+                payload = await materializer.download(figure_url)
             except RateLimitedError:
                 raise
             except PaperError:

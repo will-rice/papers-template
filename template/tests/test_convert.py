@@ -2103,6 +2103,91 @@ async def test_materialized_inputs_are_named_by_format_not_url(
 
 
 @pytest.mark.asyncio
+async def test_malformed_input_url_fails_only_that_paper(tmp_path: Path) -> None:
+    bad = paper("doi:bad", input_format="html").model_copy(
+        update={"input_url": "https://[malformed/paper.html"}
+    )
+
+    async def downloader(url: str, _timeout: float) -> bytes:
+        raise AssertionError(url)
+
+    result = await convert_batch(
+        Batch(papers=(bad,), estimated_cost=1),
+        tmp_path,
+        PipelineState(),
+        CONCURRENCY,
+        CommandRunner(),
+        DownloadingMaterializer(downloader=downloader),
+        NOW,
+    )
+
+    assert [item.paper for item in result.failed] == [bad]
+    assert "invalid conversion input URL" in (
+        result.state.failures[bad.identifier][0].error
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url", ["https://[malformed/paper.pdf", "https://example.org\uff0f@host/x"]
+)
+async def test_remote_downloader_maps_malformed_urls_to_paper_errors(url: str) -> None:
+    connector = FakeConnector()
+
+    with pytest.raises(PaperError, match="invalid conversion input URL"):
+        await RemoteDownloader(resolver=FakeResolver(), connector=connector).download(
+            url, 1
+        )
+
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_maps_malformed_redirect_to_paper_error() -> None:
+    connector = FakeConnector(
+        HttpResponse(302, b"", location="https://[malformed/x"),
+    )
+
+    with pytest.raises(PaperError, match="invalid conversion input redirect"):
+        await RemoteDownloader(
+            resolver=FakeResolver(("93.184.216.34",)), connector=connector
+        ).download("https://example.org/start", 1)
+
+
+@pytest.mark.asyncio
+async def test_malformed_figure_url_drops_only_that_figure(
+    tmp_path: Path, state: PipelineState
+) -> None:
+    target = arxiv_paper()
+    html = tmp_path / "bad-figure.html"
+    html.write_text(
+        '<article class="ltx_document"><p>Body text.</p>'
+        '<img src="https://[malformed/x.png"/>'
+        '<img src="x1.png"/></article>',
+        encoding="utf-8",
+    )
+    fake_materializer = FakeMaterializer(
+        fixtures={ARXIV_HTML_URL: html},
+        downloads={"https://arxiv.org/html/x1.png": png(8, 8)},
+    )
+    runner = TrackingRunner(materializer=fake_materializer)
+
+    result = await convert_batch(
+        Batch(papers=(target,), estimated_cost=1),
+        tmp_path,
+        state,
+        CONCURRENCY,
+        runner,
+        fake_materializer,
+        NOW,
+    )
+
+    assert result.succeeded[0].paper == target
+    assert b"malformed" not in runner.inputs[0]
+    assert b"figure-2.webp" in runner.inputs[0]
+
+
+@pytest.mark.asyncio
 async def test_pdf_inputs_that_are_not_pdfs_fail_the_paper(tmp_path: Path) -> None:
     # e.g. an "open-access PDF" link that resolves to a publisher landing page.
     target = paper("doi:10.1000/landing", input_format="pdf")

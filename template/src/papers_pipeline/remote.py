@@ -179,11 +179,19 @@ class RemoteDownloader:
                 raise PaperError(f"conversion input redirect without location: {url}")
             # Every hop goes through _get, so redirects are held to the same
             # origin and public-address checks as the original URL.
-            url = urljoin(url, response.location)
+            try:
+                url = urljoin(url, response.location)
+            except ValueError as error:
+                raise PaperError(
+                    f"invalid conversion input redirect: {response.location}"
+                ) from error
         raise PaperError(f"conversion input exceeded {MAX_REDIRECTS} redirects: {url}")
 
     async def _get(self, url: str, timeout: float) -> HttpResponse:
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+        except ValueError as error:
+            raise PaperError(f"invalid conversion input URL: {url}") from error
         host, port = _validate_origin(parts, url)
         try:
             addresses = _literal_or_resolved(host)
