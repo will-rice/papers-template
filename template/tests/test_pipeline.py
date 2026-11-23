@@ -119,7 +119,7 @@ class FakeRunner(CommandRunner):
             next(arg.split("=", 1)[1] for arg in argv if arg.startswith("--output="))
         )
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(f"# {identifier}\n", encoding="utf-8")
+        output.write_text(f"# {identifier}\n\nBody text.\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
