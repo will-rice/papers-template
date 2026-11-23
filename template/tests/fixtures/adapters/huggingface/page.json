@@ -10,11 +10,11 @@
   },
   {
     "paper": {
-      "id": "2312.00001",
-      "title": "Out of Window",
-      "summary": "Excluded by date.",
+      "id": "2401.00003",
+      "title": "Second Listed Paper",
+      "summary": "Listed on the same day.",
       "authors": [{"name": "B. Author"}],
-      "publishedAt": "2023-12-01T00:00:00Z"
+      "publishedAt": "2024-01-03T00:00:00Z"
     }
   }
 ]

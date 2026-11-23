@@ -59,12 +59,7 @@ class HuggingFaceAdapter:
                 "invalid JSON from huggingface: expected list payload"
             )
 
-        parsed_records, errors = collect_records(payload, self._record)
-        records = tuple(
-            record
-            for record in parsed_records
-            if window.start <= record.published <= window.end
-        )
+        records, errors = collect_records(payload, self._record)
         if not payload:
             previous_date = current_date - timedelta(days=1)
             next_cursor = (

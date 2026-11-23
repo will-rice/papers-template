@@ -104,7 +104,10 @@ async def test_huggingface_max_results_sets_capped_without_dropping_cursor(
         ),
     )
 
-    assert tuple(record.source_id for record in page.records) == ("2401.00001",)
+    assert tuple(record.source_id for record in page.records) == (
+        "2401.00001",
+        "2401.00003",
+    )
     assert page.next_cursor
     assert page.capped is True
 
@@ -157,7 +160,7 @@ async def test_huggingface_keeps_valid_records_and_surfaces_malformed_entries(
 
 
 @pytest.mark.asyncio
-async def test_huggingface_all_out_of_window_page_preserves_progress_for_continuation(
+async def test_huggingface_keeps_papers_listed_long_after_publication(
     huggingface_out_of_window_only_client: RequestClient,
     huggingface_config: AdapterConfig,
 ) -> None:
@@ -182,7 +185,7 @@ async def test_huggingface_all_out_of_window_page_preserves_progress_for_continu
         config=huggingface_config,
     )
 
-    assert first_page.records == ()
+    assert tuple(record.source_id for record in first_page.records) == ("2312.12345",)
     assert first_page.next_cursor
     assert first_page.capped is False
     assert first_page.permanent_errors == ()
