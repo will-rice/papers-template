@@ -89,7 +89,7 @@ def _term_pattern(term: str) -> re.Pattern[str]:
     """
     normalized = term.casefold().strip()
     stem = normalized.removesuffix("*")
-    words = [word for word in re.split(r"[\s\-]+", stem) if word]
+    words = [word for word in re.split(TERM_SEPARATOR, stem) if word]
     if not words or "*" in stem:
         raise ConfigError(f"invalid topic term: {term!r}")
     body = TERM_SEPARATOR.join(re.escape(word) for word in words)
