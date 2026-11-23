@@ -36,6 +36,7 @@ from papers_pipeline.convert import (
     DownloadingMaterializer,
     convert_batch,
     has_real_body,
+    is_cleaner_conversion,
     localize_inline_figures,
     localize_pdf_figures,
     requeue_outdated_conversions,
@@ -1535,6 +1536,10 @@ if "garbled" in Path(source).name and tool == "docling":
         body = "# converted\\n\\nBody \\ufffd\\ufffd text.\\n"
     elif "crash" in Path(source).name:
         os.kill(os.getpid(), signal.SIGSEGV)
+    elif "empty" in Path(source).name:
+        body = ""
+    elif "truncated" in Path(source).name:
+        body = "# converted\\n\\nBody\\n"
 output.write_text(body, encoding="utf-8")
 """
 
@@ -2173,6 +2178,11 @@ def test_docling_figures_move_next_to_the_paper_and_are_relinked(
         ("## Abstract\n\nA two sentence note. It is short.\n", True),
         ("See pages 3 of the appendix for the proof.\n", True),
         ("See pages 1-2 of [a.pdf](https://a.pdf)\n\nReal text.\n", True),
+        ("<!-- image -->\n", False),
+        ("## Abstract\n\n<!-- formula-not-decoded -->\n", False),
+        ("## Results\n\n![Refer to\ncaption](a.figures/figure-1.webp)\n", False),
+        ("##\nReal body line\n", True),
+        ("<!-- image -->\n\nFigure 1: A caption.\n", True),
     ],
 )
 def test_has_real_body(markdown: str, expected: bool) -> None:
@@ -2193,7 +2203,12 @@ async def test_output_with_no_body_fails_the_paper(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("identifier", "kept"),
-    [("doi:garbled", "Body text."), ("doi:garbled-crash", "Body \ufffd\ufffd text.")],
+    [
+        ("doi:garbled", "Body text."),
+        ("doi:garbled-crash", "Body \ufffd\ufffd text."),
+        ("doi:garbled-empty", "Body \ufffd\ufffd text."),
+        ("doi:garbled-truncated", "Body \ufffd\ufffd text."),
+    ],
 )
 async def test_garbled_pdf_output_is_converted_again_with_pdfium(
     tmp_path: Path, identifier: str, kept: str
@@ -2208,40 +2223,36 @@ async def test_garbled_pdf_output_is_converted_again_with_pdfium(
     )
 
 
-def test_requeue_outdated_conversions_removes_garbled_papers(tmp_path: Path) -> None:
-    garbled = paper("arxiv:1", input_format="pdf")
-    isolated = paper("arxiv:2", input_format="pdf")
-    for item, body in [
-        (garbled, "text " * 10 + "\ufffd"),
-        (isolated, "text " * 100 + "\ufffd"),
-    ]:
+@pytest.mark.parametrize(
+    ("retry", "first", "expected"),
+    [
+        ("Clean speech model text.", "Clean sp\ufffd\ufffdch model text.", True),
+        ("", "Clean sp\ufffd\ufffdch model text.", False),
+        ("<!-- image -->", "Clean sp\ufffd\ufffdch model text.", False),
+        ("Clean", "Clean sp\ufffd\ufffdch model text.", False),
+        (
+            "Clean m icrophone sp eech model text.",
+            "Clean micr\ufffdphone model text speech.",
+            False,
+        ),
+    ],
+)
+def test_is_cleaner_conversion(retry: str, first: str, expected: bool) -> None:
+    assert is_cleaner_conversion(retry, first) is expected
+
+
+def test_requeue_outdated_conversions_leaves_stubs_and_garbled_papers(
+    tmp_path: Path,
+) -> None:
+    stub = paper("arxiv:1", input_format="html")
+    garbled = paper("arxiv:2", input_format="pdf")
+    for item, body in [(stub, "## Abstract\n"), (garbled, "text " * 10 + "\ufffd")]:
         expected_markdown(tmp_path, item).parent.mkdir(parents=True, exist_ok=True)
         expected_markdown(tmp_path, item).write_text(body, encoding="utf-8")
 
-    removed = requeue_outdated_conversions(tmp_path, [garbled, isolated])
-
-    assert removed == [expected_markdown(tmp_path, garbled)]
-
-
-def test_requeue_outdated_conversions_removes_bodyless_papers(tmp_path: Path) -> None:
-    empty = paper("arxiv:1", input_format="html")
-    wrapper = paper("arxiv:2", input_format="html")
-    short = paper("arxiv:3", input_format="html")
-    for item, body in [
-        (empty, with_front_matter(empty, "## Abstract\n")),
-        (wrapper, "See pages 1-last of [x.pdf](https://x.pdf)\n"),
-        (short, with_front_matter(short, "## Abstract\n\nA short paper.\n")),
-    ]:
-        expected_markdown(tmp_path, item).parent.mkdir(parents=True, exist_ok=True)
-        expected_markdown(tmp_path, item).write_text(body, encoding="utf-8")
-
-    removed = requeue_outdated_conversions(tmp_path, [empty, wrapper, short])
-
-    assert removed == [
-        expected_markdown(tmp_path, empty),
-        expected_markdown(tmp_path, wrapper),
-    ]
-    assert infer_backlog([empty, wrapper, short], tmp_path).pending == (empty, wrapper)
+    assert requeue_outdated_conversions(tmp_path, [stub, garbled]) == []
+    assert expected_markdown(tmp_path, stub).exists()
+    assert expected_markdown(tmp_path, garbled).exists()
 
 
 def test_requeue_outdated_conversions_removes_only_outdated_papers(

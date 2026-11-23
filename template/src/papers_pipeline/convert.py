@@ -109,9 +109,18 @@ _PROBE_HTML = "<p>Conversion probe</p>"
 # Lines that carry no paper text: headings, and the note LaTeXML leaves for a
 # paper that only includes a PDF ("See pages 1-last of [x.pdf](https://x.pdf)").
 _NON_BODY_LINE = re.compile(
-    r"^(?:#{1,6}\s.*|See pages [^\n]*? of \[[^\]\n]*\.pdf\]\([^)\n]*\))\s*$",
+    r"^(?:#{1,6}(?:[ \t].*)?|See pages [^\n]*? of \[[^\]\n]*\.pdf\]\([^)\n]*\))"
+    r"[ \t]*$",
     re.MULTILINE,
 )
+# Markup that carries no paper text: docling's placeholders, such as
+# "<!-- image -->", and image links, whose alt text pandoc may wrap over lines.
+_NON_BODY_MARKUP = re.compile(r"<!--.*?-->|!\[[^\]]*\]\([^)\n]*\)", re.DOTALL)
+# Words a reader can use: four or more letters, untouched by U+FFFD or digits.
+_WHOLE_WORD = re.compile(r"(?<![\w\ufffd])[^\W\d_]{4,}(?![\w\ufffd])")
+# Runs of one or two letters. A backend that splits words ("m icrophone")
+# raises their share of the text, while its word count can still go up.
+_WORD_FRAGMENT = re.compile(r"(?<![^\W\d_])[^\W\d_]{1,2}(?![^\W\d_])")
 
 
 class CommandRunner:
@@ -633,9 +642,9 @@ async def convert_batch(
                         except (ConverterCrashError, PaperError):
                             pass
                         else:
-                            if pdfium_markdown.exists() and pdfium_markdown.read_text(
-                                encoding="utf-8"
-                            ).count("\ufffd") < first_text.count("\ufffd"):
+                            if pdfium_markdown.exists() and is_cleaner_conversion(
+                                pdfium_markdown.read_text(encoding="utf-8"), first_text
+                            ):
                                 produced_markdown = pdfium_markdown
                     localize_pdf_figures(
                         produced_markdown, staged_output.with_suffix(".figures")
@@ -876,10 +885,47 @@ def has_real_body(markdown: str) -> bool:
 
     Returns:
         False for empty output, headings alone (such as a lone "## Abstract"),
-        or a LaTeXML article that only wraps a PDF include.
+        image links or docling placeholders alone, or a LaTeXML article that
+        only wraps a PDF include.
     """
-    body = _NON_BODY_LINE.sub("", without_front_matter(markdown))
-    return re.search(r"\w", body) is not None
+    return re.search(r"\w", _body_text(markdown)) is not None
+
+
+def _body_text(markdown: str) -> str:
+    """Return converted markdown without front matter, markup and headings."""
+    return _NON_BODY_LINE.sub(
+        "", _NON_BODY_MARKUP.sub("", without_front_matter(markdown))
+    )
+
+
+def is_cleaner_conversion(retry: str, first: str) -> bool:
+    """Whether a retry is the same paper with less damage than the first output.
+
+    Fewer U+FFFD alone proves nothing, since empty output has none. The retry
+    must also keep at least as many whole words, which rejects truncation, and
+    no larger a share of word fragments, which rejects split words. On stored
+    papers this keeps pdfium for arxiv-2603-25750 (recovered words) and rejects
+    it for arxiv-2010-01703v2 (split words).
+
+    Args:
+        retry: Markdown from the second conversion.
+        first: Markdown from the first conversion.
+
+    Returns:
+        True if the retry should replace the first output.
+    """
+    retry_body, first_body = _body_text(retry), _body_text(first)
+    retry_words = len(_WHOLE_WORD.findall(retry_body))
+    first_words = len(_WHOLE_WORD.findall(first_body))
+    return (
+        has_real_body(retry)
+        and retry_body.count("\ufffd") < first_body.count("\ufffd")
+        and retry_words >= first_words
+        # Cross-multiplied shares, so a first output with no words cannot divide
+        # by zero.
+        and len(_WORD_FRAGMENT.findall(retry_body)) * first_words
+        <= len(_WORD_FRAGMENT.findall(first_body)) * retry_words
+    )
 
 
 def is_garbled(markdown: str) -> bool:
@@ -896,7 +942,7 @@ def is_garbled(markdown: str) -> bool:
 
 
 def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Path]:
-    """Delete outdated, bodyless or garbled conversions for the next nightly.
+    """Delete outdated conversions so the next nightly run redoes them.
 
     Args:
         root: Repository root.
@@ -911,11 +957,7 @@ def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Pa
         if not markdown.exists():
             continue
         text = markdown.read_text(encoding="utf-8")
-        if (
-            not has_real_body(text)
-            or is_garbled(text)
-            or any(pattern.search(text) for pattern in _OUTDATED_CONVERSION)
-        ):
+        if any(pattern.search(text) for pattern in _OUTDATED_CONVERSION):
             markdown.unlink()
             shutil.rmtree(expected_figures(root, paper), ignore_errors=True)
             removed.append(markdown)
