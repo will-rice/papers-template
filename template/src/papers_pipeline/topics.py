@@ -1,4 +1,3 @@
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
@@ -6,12 +5,9 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from papers_pipeline.config import TopicConfig
+from papers_pipeline.config import TopicConfig, term_pattern
 from papers_pipeline.errors import ConfigError
 from papers_pipeline.models import Paper
-
-# Spaces and every Unicode hyphen or dash used between the words of a term.
-TERM_SEPARATOR = r"[\s\-\u2010-\u2015]+"
 
 
 @dataclass(frozen=True)
@@ -35,7 +31,7 @@ def build_topic_gate(config: TopicConfig) -> Callable[[Paper], TopicDecision]:
         return plugin_gate
 
     patterns = {
-        term: _term_pattern(term)
+        term: term_pattern(term)
         for term in (*config.exclude_any, *config.include_all, *config.include_any)
     }
 
@@ -69,35 +65,6 @@ def build_topic_gate(config: TopicConfig) -> Callable[[Paper], TopicDecision]:
         return TopicDecision(True, "accepted")
 
     return gate
-
-
-def _term_pattern(term: str) -> re.Pattern[str]:
-    """Compile a configured term into a whole-word matcher.
-
-    A term matches whole words, with a simple plural on its last word. Spaces
-    and hyphens in a term are interchangeable, so "lip sync" matches "lip-sync".
-    A trailing `*` marks a stem that matches any word ending ("vocaliz*").
-
-    Args:
-        term: The configured term.
-
-    Returns:
-        A pattern to search casefolded text with.
-
-    Raises:
-        ConfigError: If `*` appears anywhere but the end, or the term is empty.
-    """
-    normalized = term.casefold().strip()
-    stem = normalized.removesuffix("*")
-    words = [word for word in re.split(r"[\s\-]+", stem) if word]
-    if not words or "*" in stem:
-        raise ConfigError(f"invalid topic term: {term!r}")
-    body = TERM_SEPARATOR.join(re.escape(word) for word in words)
-    if normalized.endswith("*"):
-        return re.compile(rf"(?<!\w){body}")
-    if words[-1].endswith("y"):
-        body = f"{body[:-1]}(?:y|ies)"
-    return re.compile(rf"(?<!\w){body}(?:es|s)?(?!\w)")
 
 
 def _validated_plugin_reference(plugin: str) -> str:

@@ -694,6 +694,7 @@ def test_declarative_gate_reports_missing_categories(
         ("speech super-resolution", "Speech super resolution", True),
         ("speech super resolution", "Speech super-resolution", True),
         ("lip sync", "Lip\u2013sync evaluation", True),
+        ("lip\u2010sync", "A lip sync model", True),
         ("xeno-canto", "Recordings from Xeno-Canto", True),
     ],
 )

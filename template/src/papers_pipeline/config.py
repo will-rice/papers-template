@@ -42,6 +42,8 @@ _FIELD_MESSAGES: dict[tuple[str, ...], str] = {
 _TOPIC_PLUGIN_PATTERN = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
 )
+# Spaces and every Unicode hyphen or dash used between the words of a term.
+TERM_SEPARATOR = r"[\s\-\u2010-\u2015]+"
 _ALLOWED_FILTER_KEYS: dict[AdapterName, frozenset[str]] = {
     "arxiv": frozenset({"search_query"}),
     "huggingface": frozenset(),
@@ -125,6 +127,43 @@ class TopicConfig(StrictModel):
         if value is None or _TOPIC_PLUGIN_PATTERN.match(value):
             return value
         raise ValueError("topic.plugin must use module:function format")
+
+    @model_validator(mode="after")
+    def validate_terms(self) -> "TopicConfig":
+        # A plugin replaces the keyword gate, which then never compiles terms.
+        if self.plugin is None:
+            for term in (*self.exclude_any, *self.include_all, *self.include_any):
+                term_pattern(term)
+        return self
+
+
+def term_pattern(term: str) -> re.Pattern[str]:
+    """Compile a configured term into a whole-word matcher.
+
+    A term matches whole words, with a simple plural on its last word. Spaces
+    and hyphens in a term are interchangeable, so "lip sync" matches "lip-sync".
+    A trailing `*` marks a stem that matches any word ending ("vocaliz*").
+
+    Args:
+        term: The configured term.
+
+    Returns:
+        A pattern to search casefolded text with.
+
+    Raises:
+        ConfigError: If `*` appears anywhere but the end, or the term is empty.
+    """
+    normalized = term.casefold().strip()
+    stem = normalized.removesuffix("*")
+    words = [word for word in re.split(TERM_SEPARATOR, stem) if word]
+    if not words or "*" in stem:
+        raise ConfigError(f"invalid topic term: {term!r}")
+    body = TERM_SEPARATOR.join(re.escape(word) for word in words)
+    if normalized.endswith("*"):
+        return re.compile(rf"(?<!\w){body}")
+    if words[-1].endswith("y"):
+        body = f"{body[:-1]}(?:y|ies)"
+    return re.compile(rf"(?<!\w){body}(?:es|s)?(?!\w)")
 
 
 class FetchConfig(StrictModel):
