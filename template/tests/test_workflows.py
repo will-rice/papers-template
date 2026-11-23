@@ -248,6 +248,7 @@ def _nightly_scenario(
     *,
     dirty_path: str | None,
     concurrent_push: bool = False,
+    conflicting_push: bool = False,
     rejected_pushes: int = 0,
 ) -> tuple[int, int]:
     origin = tmp_path / "origin.git"
@@ -279,6 +280,19 @@ def _nightly_scenario(
     hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
 
     concurrent_command = ""
+    sleep_command = ""
+    if conflicting_push:
+        other = tmp_path / "other"
+        _git(tmp_path, "clone", "-q", "-b", "main", str(origin), str(other))
+        _git(other, "config", "user.name", "Other")
+        _git(other, "config", "user.email", "other@example.test")
+        concurrent_command = (
+            f'printf "conflict\\n" >> "{other}/papers.csv"\n'
+            f'git -C "{other}" commit -q -am "conflicting merge"\n'
+            f'git -C "{other}" push -q origin main\n'
+        )
+        # The conflicting commit is reverted upstream before the next attempt.
+        sleep_command = f'git -C "{other}" push -q --force origin HEAD~1:main\n'
     if concurrent_push:
         other = tmp_path / "other"
         _git(tmp_path, "clone", "-q", "-b", "main", str(origin), str(other))
@@ -316,7 +330,7 @@ def _nightly_scenario(
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
     # Retries wait between attempts; the test does not need to.
     sleep = fake_bin / "sleep"
-    sleep.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    sleep.write_text(f"#!/usr/bin/env bash\n{sleep_command}", encoding="utf-8")
     sleep.chmod(sleep.stat().st_mode | stat.S_IXUSR)
     script = SCRIPTS / "nightly.sh"
     git_executable = shutil.which("git")
@@ -380,6 +394,16 @@ def test_nightly_retries_a_rejected_push(
     )
     assert status != 0
     assert remote_count == expected_commits
+
+
+def test_nightly_aborts_a_failed_rebase_before_retrying(tmp_path: Path) -> None:
+    status, remote_count = _nightly_scenario(
+        tmp_path, dirty_path=None, conflicting_push=True
+    )
+
+    assert status != 0
+    assert remote_count == 2
+    assert not (tmp_path / "work" / ".git" / "REBASE_HEAD").exists()
 
 
 def test_nightly_script_publishes_every_batch_and_retries_the_final_push() -> None:
