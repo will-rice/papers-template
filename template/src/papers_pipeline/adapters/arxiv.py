@@ -10,7 +10,10 @@ from papers_pipeline.errors import InfrastructureError, PaperError
 from papers_pipeline.http import RequestClient
 from papers_pipeline.models import SourceRecord
 
-ATOM = {"a": "http://www.w3.org/2005/Atom"}
+ATOM = {
+    "a": "http://www.w3.org/2005/Atom",
+    "opensearch": "http://a9.com/-/spec/opensearch/1.1/",
+}
 
 
 class ArxivAdapter:
@@ -37,6 +40,7 @@ class ArxivAdapter:
                 "sortOrder": "ascending",
             },
             {},
+            is_incomplete=lambda body: _is_empty_before_total(body, state["start"]),
         )
         try:
             root = ElementTree.fromstring(text)
@@ -118,6 +122,18 @@ class ArxivAdapter:
             input_url=f"https://arxiv.org/pdf/{identifier}",
             categories=categories,
         )
+
+
+def _is_empty_before_total(text: str, start: int) -> bool:
+    """Return whether a page has no entries although results remain after start."""
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError:
+        return False
+    total = root.findtext("opensearch:totalResults", namespaces=ATOM)
+    return (
+        root.find("a:entry", ATOM) is None and total is not None and start < int(total)
+    )
 
 
 def _encode_cursor(state: dict[str, int]) -> str:

@@ -7,7 +7,7 @@ import pytest
 from papers_pipeline.adapters.arxiv import ArxivAdapter
 from papers_pipeline.adapters.base import FetchWindow
 from papers_pipeline.config import AdapterConfig, FetchConfig
-from papers_pipeline.errors import InfrastructureError
+from papers_pipeline.errors import InfrastructureError, SourceUnavailableError
 from papers_pipeline.http import Deadline, RequestClient
 from papers_pipeline.normalize import normalize
 
@@ -263,3 +263,81 @@ async def test_arxiv_remote_query_is_bound_to_window_and_stable_across_resume(
     ]
     assert [request.url.params["start"] for request in requests] == ["0", "2"]
     assert tuple(record.source_id for record in second.records) == ("2401.00002",)
+
+
+def _arxiv_feed(total: int, *entries: str) -> str:
+    return (
+        '<feed xmlns="http://www.w3.org/2005/Atom" '
+        'xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
+        f"<opensearch:totalResults>{total}</opensearch:totalResults>"
+        f"{''.join(entries)}</feed>"
+    )
+
+
+ARXIV_ENTRY = (
+    "<entry><id>http://arxiv.org/abs/2401.00009v1</id>"
+    "<published>2024-01-02T00:00:00Z</published><title>Paper</title>"
+    "<summary>Abstract</summary><author><name>A. Author</name></author></entry>"
+)
+ARXIV_WINDOW = FetchWindow(
+    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+)
+
+
+@pytest.mark.asyncio
+async def test_arxiv_retries_an_empty_page_before_total_results(
+    arxiv_config: AdapterConfig,
+) -> None:
+    bodies = [_arxiv_feed(1), _arxiv_feed(1, ARXIV_ENTRY)]
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text=bodies.pop(0)))
+    config = FetchConfig(
+        request_timeout_seconds=5,
+        retries=1,
+        backoff_seconds=0,
+        total_deadline_seconds=300,
+    )
+    async with RequestClient(
+        config, Deadline.start(300), transport=transport
+    ) as client:
+        page = await ArxivAdapter().fetch(ARXIV_WINDOW, None, client, arxiv_config)
+
+    assert tuple(record.source_id for record in page.records) == ("2401.00009v1",)
+    assert page.next_cursor is not None
+
+
+@pytest.mark.asyncio
+async def test_arxiv_empty_page_before_total_results_is_not_complete(
+    arxiv_config: AdapterConfig,
+) -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text=_arxiv_feed(5)))
+    config = FetchConfig(
+        request_timeout_seconds=5,
+        retries=1,
+        backoff_seconds=0,
+        total_deadline_seconds=300,
+    )
+    async with RequestClient(
+        config, Deadline.start(300), transport=transport
+    ) as client:
+        with pytest.raises(SourceUnavailableError, match="retries exhausted"):
+            await ArxivAdapter().fetch(ARXIV_WINDOW, None, client, arxiv_config)
+
+
+@pytest.mark.asyncio
+async def test_arxiv_empty_page_at_total_results_completes(
+    arxiv_config: AdapterConfig,
+) -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text=_arxiv_feed(0)))
+    config = FetchConfig(
+        request_timeout_seconds=5,
+        retries=1,
+        backoff_seconds=0,
+        total_deadline_seconds=300,
+    )
+    async with RequestClient(
+        config, Deadline.start(300), transport=transport
+    ) as client:
+        page = await ArxivAdapter().fetch(ARXIV_WINDOW, None, client, arxiv_config)
+
+    assert page.next_cursor is None

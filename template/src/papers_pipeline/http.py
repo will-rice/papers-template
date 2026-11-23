@@ -64,7 +64,12 @@ class RequestClient:
         await self._client.aclose()
 
     async def get_text(
-        self, url: str, params: Mapping[str, str], headers: Mapping[str, str]
+        self,
+        url: str,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+        *,
+        is_incomplete: Callable[[str], bool] | None = None,
     ) -> str:
         for attempt in range(self.config.retries + 1):
             timeout = min(
@@ -107,6 +112,14 @@ class RequestClient:
                 elif response.is_error:
                     raise SourceUnavailableError(
                         f"permanent HTTP {response.status_code}: {url}"
+                    )
+                elif is_incomplete is not None and is_incomplete(response.text):
+                    if attempt == self.config.retries:
+                        raise SourceUnavailableError(
+                            f"request retries exhausted: {url}"
+                        )
+                    self.events.append(
+                        f"retry {attempt + 1}: incomplete response for {url}"
                     )
                 else:
                     return str(response.text)
