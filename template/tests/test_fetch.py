@@ -5,7 +5,10 @@ from datetime import date, datetime, time, timedelta, timezone
 import httpx
 import pytest
 
-from papers_pipeline.adapters.base import FetchPage, FetchWindow
+from papers_pipeline.adapters.arxiv import ArxivAdapter
+from papers_pipeline.adapters.base import Adapter, FetchPage, FetchWindow
+from papers_pipeline.adapters.dblp import DblpAdapter
+from papers_pipeline.adapters.semantic_scholar import SemanticScholarAdapter
 from papers_pipeline.config import (
     AdapterConfig,
     AdapterName,
@@ -644,3 +647,98 @@ def test_backfill_requires_a_source_that_queries_date_ranges(
                 "backfill_start": date(2020, 1, 1),
             }
         )
+
+
+def endless_arxiv_page(request: httpx.Request) -> httpx.Response:
+    start = int(request.url.params["start"])
+    entries = "".join(
+        f"<entry><id>http://arxiv.org/abs/2609.{index:05d}v1</id>"
+        "<published>2026-09-22T00:00:00Z</published><title>Paper</title>"
+        "<summary>Abstract</summary><author><name>A. Author</name></author></entry>"
+        for index in (start, start + 1)
+    )
+    return httpx.Response(
+        200,
+        text=(
+            '<feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
+            f"<opensearch:totalResults>1000</opensearch:totalResults>{entries}</feed>"
+        ),
+    )
+
+
+def endless_dblp_page(request: httpx.Request) -> httpx.Response:
+    start = int(request.url.params["f"])
+    hits = [
+        {
+            "info": {
+                "key": f"conf/test/{index}",
+                "title": "Paper",
+                "year": "2026",
+                "ee": f"https://public.example/{index}.pdf",
+            }
+        }
+        for index in (start, start + 1)
+    ]
+    return httpx.Response(200, json={"result": {"hits": {"hit": hits}}})
+
+
+def endless_semantic_scholar_page(request: httpx.Request) -> httpx.Response:
+    start = int(request.url.params["offset"])
+    data = [
+        {
+            "paperId": f"paper-{index}",
+            "title": "Paper",
+            "publicationDate": "2026-09-22",
+            "openAccessPdf": {"url": f"https://public.example/{index}.pdf"},
+        }
+        for index in (start, start + 1)
+    ]
+    return httpx.Response(200, json={"total": 1000, "next": start + 2, "data": data})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "adapter", "respond"),
+    [
+        ("arxiv", ArxivAdapter(), endless_arxiv_page),
+        ("dblp", DblpAdapter(), endless_dblp_page),
+        (
+            "semantic_scholar",
+            SemanticScholarAdapter("key"),
+            endless_semantic_scholar_page,
+        ),
+    ],
+    ids=["arxiv", "dblp", "semantic_scholar"],
+)
+async def test_resumed_fetch_gets_a_full_page_budget_every_run(
+    name: AdapterName,
+    adapter: Adapter,
+    respond: Callable[[httpx.Request], httpx.Response],
+) -> None:
+    config = pipeline_config(
+        adapter_config(name, lookback_days=7, max_pages=3, max_results=1000)
+    )
+    requests_per_run: list[int] = []
+    state = PipelineState()
+    for _ in range(4):
+        requests: list[httpx.URL] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            requests.append(request.url)
+            return respond(request)
+
+        result = await fetch_all(
+            config,
+            state,
+            {adapter.name: adapter},
+            lambda deadline: RequestClient(
+                config.fetch, deadline, transport=httpx.MockTransport(handle)
+            ),
+            NOW,
+        )
+        state = result.state
+        requests_per_run.append(len(requests))
+
+    assert requests_per_run == [3, 3, 3, 3]
+    assert adapter.name in state.continuations

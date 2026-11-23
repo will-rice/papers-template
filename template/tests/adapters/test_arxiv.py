@@ -56,7 +56,7 @@ async def test_arxiv_continuation_cursor_is_deterministic_and_opaque(
 
 
 @pytest.mark.asyncio
-async def test_arxiv_max_pages_sets_capped_without_dropping_cursor(
+async def test_arxiv_leaves_the_page_budget_to_the_fetch_loop(
     arxiv_client: RequestClient, arxiv_config: AdapterConfig
 ) -> None:
     adapter = ArxivAdapter()
@@ -81,7 +81,7 @@ async def test_arxiv_max_pages_sets_capped_without_dropping_cursor(
     )
 
     assert page.next_cursor
-    assert page.capped is True
+    assert page.capped is False
 
 
 @pytest.mark.asyncio

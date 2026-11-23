@@ -65,7 +65,7 @@ async def test_semantic_scholar_uses_declared_api_key_and_opaque_continuation(
 
 
 @pytest.mark.asyncio
-async def test_semantic_scholar_max_pages_sets_capped_without_dropping_cursor(
+async def test_semantic_scholar_leaves_the_page_budget_to_the_fetch_loop(
     semantic_scholar_client: RequestClient,
     semantic_scholar_config: AdapterConfig,
 ) -> None:
@@ -93,7 +93,7 @@ async def test_semantic_scholar_max_pages_sets_capped_without_dropping_cursor(
     )
 
     assert second_page.next_cursor
-    assert second_page.capped is True
+    assert second_page.capped is False
 
 
 @pytest.mark.asyncio

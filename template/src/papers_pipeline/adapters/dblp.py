@@ -52,10 +52,7 @@ class DblpAdapter:
             "page": state["page"] + 1,
         }
         next_cursor = _encode_cursor(next_state)
-        capped = (
-            next_state["page"] >= config.max_pages
-            or next_state["consumed"] >= config.max_results
-        )
+        capped = len(hits) >= config.max_results
         return FetchPage(
             records=records,
             next_cursor=next_cursor,
