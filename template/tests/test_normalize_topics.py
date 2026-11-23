@@ -512,6 +512,45 @@ def test_declarative_gate_reports_missing_categories(
     )
 
 
+@pytest.mark.parametrize(
+    ("term", "text", "matched"),
+    [
+        ("ape", "This paper studies the shape of data", False),
+        ("egret", "An online regret bound", False),
+        ("bear", "Fault detection in ball bearings", False),
+        ("bird", "Birds of the Amazon", True),
+        ("bird", "A non-bird baseline", True),
+        ("bird", "Automated birdsong analysis", False),
+        ("bird*", "Automated birdsong analysis", True),
+        ("vocaliz*", "Fish vocalizations under noise", True),
+        ("vocaliz*", "Revocalized speech", False),
+        ("dragonfly", "Tracking dragonflies", True),
+        ("finch", "Darwin's finches", True),
+        ("bat ", "Echolocating bats", True),
+        ("speech super-resolution", "Speech super resolution", True),
+        ("speech super resolution", "Speech super-resolution", True),
+        ("lip sync", "Lip\u2013sync evaluation", True),
+        ("xeno-canto", "Recordings from Xeno-Canto", True),
+    ],
+)
+def test_declarative_gate_matches_whole_terms(
+    topic_config: TopicConfig, paper: Paper, term: str, text: str, matched: bool
+) -> None:
+    gate = build_topic_gate(topic_config.model_copy(update={"include_any": [term]}))
+
+    decision = gate(paper.model_copy(update={"title": text, "abstract": "None."}))
+
+    assert decision.accepted is matched
+
+
+@pytest.mark.parametrize("term", ["*", " ", "vo*cal", "*bird"])
+def test_declarative_gate_rejects_malformed_terms(
+    topic_config: TopicConfig, term: str
+) -> None:
+    with pytest.raises(ConfigError, match="invalid topic term"):
+        build_topic_gate(topic_config.model_copy(update={"exclude_any": [term]}))
+
+
 def test_plugin_reference_must_use_module_function_format(
     topic_config: TopicConfig,
 ) -> None:

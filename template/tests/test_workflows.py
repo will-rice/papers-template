@@ -102,6 +102,52 @@ def test_conversion_environment_comes_from_the_lock() -> None:
     assert (SCRIPTS / "setup-conversion.sh").stat().st_mode & stat.S_IXUSR
 
 
+@pytest.mark.parametrize(
+    ("failures", "exit_code", "downloads"),
+    [(0, 0, 1), (3, 0, 4), (99, 7, 4)],
+    ids=["first-try", "recovers", "gives-up"],
+)
+def test_conversion_setup_retries_the_model_download(
+    tmp_path: Path, failures: int, exit_code: int, downloads: int
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "downloads"
+    executables = {
+        "uv": (
+            'if [ "$2" = docling-tools ]; then\n'
+            f'  echo x >> "{calls}"\n'
+            f'  [ "$(wc -l < "{calls}")" -gt {failures} ] || exit 7\n'
+            "fi\n"
+            'if [ "$2" = python ]; then echo /bin/true; fi\n'
+        ),
+        "npm": "",
+        "sleep": "",
+    }
+    for name, body in executables.items():
+        path = bin_dir / name
+        path.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+        path.chmod(0o755)
+    environment = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "GITHUB_ENV": str(tmp_path / "github_env"),
+        "GITHUB_PATH": str(tmp_path / "github_path"),
+    }
+
+    result = subprocess.run(
+        ["bash", str((SCRIPTS / "setup-conversion.sh").resolve())],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == exit_code, result.stderr
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == downloads
+
+
 def test_ci_proves_the_nightly_conversion_environment() -> None:
     # The nightly and CI build the environment with the same script, and CI
     # then converts real fixtures with it.

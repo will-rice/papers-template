@@ -91,7 +91,9 @@ The supported `filters` are:
 - `huggingface` and `papers_with_code`: no filter keys
 
 Topic gates support `include_any`, `include_all`, `exclude_any`, and
-`categories`. Set `plugin: topic_plugin:accept_topic` only when these gates
+`categories`. Terms match whole words in the title and abstract, ignoring case,
+with a simple plural on the last word; spaces and hyphens in a term are
+interchangeable. End a term with `*` to match any word ending (`vocaliz*`). Set `plugin: topic_plugin:accept_topic` only when these gates
 cannot express the repository rule; the plugin accepts `Paper` and returns
 `TopicDecision`.
 
@@ -203,6 +205,9 @@ The workflow also runs after every completed `Nightly papers` workflow,
 including safe partial runs that commit inventory before a later conversion
 failure. It saves every inventory paper and removes every paper that was once
 in `papers.csv` but has since been dropped, found in the file's git history.
+Papers arXiv has withdrawn stay in `papers.csv` but are removed from the
+collection; only papers with a fixme marker are checked, and while arXiv is
+unreachable those papers are neither saved nor removed.
 Both steps are idempotent. Papers added to the collection by hand, which were
 never in the inventory, are left alone.
 
