@@ -818,14 +818,10 @@ async def test_catch_up_resumes_and_records_only_the_completed_window_end() -> N
     "adapter",
     [
         RecordingAdapter(
-            "arxiv",
-            pages=[FetchPage(records=(), next_cursor=None, capped=True)],
-        ),
-        RecordingAdapter(
             "arxiv", failure=SourceUnavailableError("request retries exhausted")
         ),
     ],
-    ids=["capped_without_cursor", "unavailable"],
+    ids=["unavailable"],
 )
 async def test_incomplete_forward_window_keeps_the_last_success(
     adapter: RecordingAdapter,
@@ -959,8 +955,90 @@ async def test_resumed_catch_up_completes_and_records_success(
     assert state.fetched_through == {name: NOW}
 
 
+def semantic_scholar_search(
+    papers_per_day: Callable[[date], int],
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Answer date-range searches with the API's 1,000-result offset limit."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        first, last = request.url.params["publicationDateOrYear"].split(":")
+        start, end = date.fromisoformat(first), date.fromisoformat(last)
+        offset = int(request.url.params["offset"])
+        limit = int(request.url.params["limit"])
+        if offset + limit > 1000:
+            return httpx.Response(400, request=request, text="offset out of range")
+        days = [
+            start + timedelta(days=index) for index in range((end - start).days + 1)
+        ]
+        matches = [
+            (day, number) for day in days for number in range(papers_per_day(day))
+        ]
+        return httpx.Response(
+            200,
+            json={
+                "total": len(matches),
+                "data": [
+                    {
+                        "paperId": f"{day.isoformat()}-{number}",
+                        "title": f"Paper {day.isoformat()} {number}",
+                        "publicationDate": day.isoformat(),
+                        "openAccessPdf": {"url": "https://example.test/paper.pdf"},
+                    }
+                    for day, number in matches[offset : offset + limit]
+                ],
+            },
+        )
+
+    return handle
+
+
 @pytest.mark.asyncio
-async def test_unreachable_semantic_scholar_results_keep_the_last_success() -> None:
+async def test_dense_catch_up_walks_bounded_windows_without_losing_a_paper() -> None:
+    config = pipeline_config(
+        adapter_config(
+            "semantic_scholar",
+            lookback_days=7,
+            page_size=100,
+            max_pages=5,
+            max_results=500,
+        )
+    )
+    last_success = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    handle = semantic_scholar_search(lambda _: 30)
+    adapter = SemanticScholarAdapter("key")
+    state = PipelineState(fetched_through={adapter.name: last_success})
+    seen: set[str] = set()
+    starts: list[datetime] = []
+    run_at = NOW
+    for night in range(12):
+        run_at = NOW + timedelta(days=night)
+        result = await fetch_all(
+            config,
+            state,
+            {adapter.name: adapter},
+            lambda deadline: RequestClient(
+                config.fetch, deadline, transport=httpx.MockTransport(handle)
+            ),
+            run_at,
+        )
+        seen |= {record.source_id for record in result.records}
+        state = result.state
+        starts.append(state.fetched_through[adapter.name])
+
+    assert starts == sorted(starts)
+    # The first night's capped span resumes on the second night.
+    assert starts[1] > last_success
+    assert state.fetched_through[adapter.name] >= run_at - timedelta(days=7)
+    day = last_success.date()
+    expected: set[str] = set()
+    while day < starts[-1].date():
+        expected |= {f"{day.isoformat()}-{number}" for number in range(30)}
+        day += timedelta(days=1)
+    assert expected <= seen
+
+
+@pytest.mark.asyncio
+async def test_single_day_over_the_limit_is_reported_and_passed() -> None:
     config = pipeline_config(
         adapter_config(
             "semantic_scholar",
@@ -970,22 +1048,13 @@ async def test_unreachable_semantic_scholar_results_keep_the_last_success() -> N
             max_results=10000,
         )
     )
-    last_success = NOW - timedelta(days=60)
-    offsets: list[int] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        offset = int(request.url.params["offset"])
-        offsets.append(offset)
-        if offset >= 1000:
-            return httpx.Response(400, request=request, text="offset out of range")
-        return httpx.Response(
-            200, json={"total": 5000, "next": offset + 100, "data": [{}] * 100}
-        )
-
+    dense = (NOW - timedelta(days=3)).date()
+    handle = semantic_scholar_search(lambda day: 1500 if day == dense else 1)
     adapter = SemanticScholarAdapter("key")
+
     result = await fetch_all(
         config,
-        PipelineState(fetched_through={"arxiv": NOW, adapter.name: last_success}),
+        PipelineState(),
         {adapter.name: adapter},
         lambda deadline: RequestClient(
             config.fetch, deadline, transport=httpx.MockTransport(handle)
@@ -993,11 +1062,48 @@ async def test_unreachable_semantic_scholar_results_keep_the_last_success() -> N
         NOW,
     )
 
-    assert offsets == list(range(0, 1000, 100))
+    assert result.state.fetched_through == {adapter.name: NOW}
     assert result.stats[0].capped is True
     assert result.stats[0].complete is False
-    assert result.state.continuations == {}
-    assert result.state.fetched_through[adapter.name] == last_success
+    assert any(f"window {dense}..{dense} matches 1500" in e for e in result.events)
+    ids = {record.source_id for record in result.records}
+    assert f"{dense + timedelta(days=1)}-0" in ids
+    assert f"{dense - timedelta(days=1)}-0" in ids
+
+
+@pytest.mark.asyncio
+async def test_dense_backfill_chunk_moves_back_without_a_gap() -> None:
+    config = pipeline_config(
+        adapter_config(
+            "semantic_scholar",
+            lookback_days=1,
+            page_size=100,
+            max_pages=100,
+            max_results=10000,
+        ).model_copy(
+            update={
+                "backfill_start": (NOW - timedelta(days=41)).date(),
+                "backfill_days": 40,
+            }
+        )
+    )
+    handle = semantic_scholar_search(lambda _: 40)
+    adapter = SemanticScholarAdapter("key")
+
+    result = await fetch_all(
+        config,
+        PipelineState(),
+        {adapter.name: adapter},
+        lambda deadline: RequestClient(
+            config.fetch, deadline, transport=httpx.MockTransport(handle)
+        ),
+        NOW,
+    )
+
+    ids = {record.source_id for record in result.records}
+    first_day = (NOW - timedelta(days=41)).date()
+    assert {f"{first_day + timedelta(days=offset)}-39" for offset in range(40)} <= ids
+    assert result.state.backfill[adapter.name].continuation is None
 
 
 @pytest.mark.asyncio

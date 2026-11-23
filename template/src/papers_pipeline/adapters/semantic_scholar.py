@@ -32,6 +32,12 @@ class SemanticScholarAdapter:
         config: AdapterConfig,
     ) -> FetchPage:
         state = _decode_cursor(cursor)
+        # A resumed walk can sit at any offset; never ask past the reachable end.
+        limit = (
+            min(config.page_size, _REACHABLE_RESULTS - int(state["offset"]))
+            if state["offset"].isdecimal()
+            else config.page_size
+        )
         text = await client.get_text(
             _SEARCH_URL,
             {
@@ -40,7 +46,7 @@ class SemanticScholarAdapter:
                     f"{window.start.date().isoformat()}:{window.end.date().isoformat()}"
                 ),
                 "offset": state["offset"],
-                "limit": str(config.page_size),
+                "limit": str(limit),
                 "fields": (
                     "paperId,title,abstract,authors,publicationDate,url,"
                     "externalIds,openAccessPdf"
@@ -49,13 +55,20 @@ class SemanticScholarAdapter:
             {"x-api-key": self.api_key},
         )
         items, next_offset, total = _payload_page(text)
+        if (
+            state["page"] == 0
+            and total > _REACHABLE_RESULTS
+            and window.start.date() != window.end.date()
+        ):
+            # The caller narrows the window, so walking this one is wasted.
+            return FetchPage(records=(), next_cursor=None, capped=True)
         parsed_records, errors = collect_records(items, self._record)
         if state["page"] == 0 and total > _REACHABLE_RESULTS:
             errors = (
                 *errors,
                 f"semantic_scholar window {window.start.date()}..{window.end.date()} "
                 f"matches {total} papers; only the first {_REACHABLE_RESULTS} are "
-                "reachable, so shorten the window",
+                "reachable, so the rest of that day is skipped",
             )
         records = tuple(
             record
