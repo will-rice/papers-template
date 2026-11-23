@@ -1516,6 +1516,11 @@ if "crash" in Path(source).name:
     os.kill(os.getpid(), signal.SIGSEGV)
 if "slow" in Path(source).name:
     time.sleep(60)
+if "badhtml" in Path(source).name and source.endswith(".html"):
+    os.kill(os.getpid(), signal.SIGSEGV)
+if "corrupthtml" in Path(source).name and source.endswith(".html"):
+    print("corrupt input document", file=sys.stderr)
+    raise SystemExit(1)
 if "oom" in Path(source).name:
     print("CUDA out of memory", file=sys.stderr)
     raise SystemExit(1)
@@ -1917,6 +1922,55 @@ async def test_rate_limited_arxiv_html_defers_the_paper_instead_of_falling_back(
 
     assert [item.paper for item in result.deferred] == [target]
     assert result.failed == ()
+
+
+async def _convert_arxiv_html_failure(
+    root: Path, identifier: str, broken: Sequence[str] = ()
+) -> tuple[Paper, convert.ConversionResult]:
+    """Convert an arXiv paper whose HTML fails in pandoc and whose PDF works."""
+    target = arxiv_paper().model_copy(update={"identifier": identifier})
+    workspace = root / "work"
+    workspace.mkdir()
+    result = await convert_batch(
+        Batch(papers=(target,), estimated_cost=1),
+        workspace,
+        PipelineState(),
+        CONCURRENCY,
+        CrashingConverterRunner(root / "converter.py", broken),
+        FakeMaterializer(
+            fixtures={
+                target.input_url: fixture_for(target),
+                ARXIV_HTML_URL: FIXTURES / "arxiv_figures.html",
+            },
+            downloads={"https://arxiv.org/html/2401.12345/x1.png": png(8, 8)},
+        ),
+        NOW,
+    )
+    return target, result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["badhtml", "corrupthtml"])
+async def test_arxiv_html_conversion_failure_falls_through_to_the_pdf(
+    tmp_path: Path, failure: str
+) -> None:
+    target, result = await _convert_arxiv_html_failure(tmp_path, f"arxiv:{failure}")
+
+    assert [item.paper for item in result.succeeded] == [target]
+    assert result.failed == ()
+    assert result.state.failures == {}
+    # Figures saved for the abandoned HTML rendering do not outlive it.
+    assert not expected_figures(tmp_path / "work", target).exists()
+
+
+@pytest.mark.asyncio
+async def test_broken_pandoc_aborts_even_when_the_pdf_converts(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(InfrastructureError, match="pandoc failed on a known-good"):
+        await _convert_arxiv_html_failure(tmp_path, "arxiv:badhtml", broken=["pandoc"])
+
+    assert not list((tmp_path / "work").glob("papers/*.md"))
 
 
 @pytest.mark.conversion

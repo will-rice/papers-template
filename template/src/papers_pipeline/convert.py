@@ -471,6 +471,7 @@ async def convert_batch(
         """
         assert paper.arxiv_id is not None
         for url in _ARXIV_HTML_URLS:
+            shutil.rmtree(staged_output.with_suffix(".figures"), ignore_errors=True)
             html_paper = paper.model_copy(
                 update={
                     "input_format": "html",
@@ -499,14 +500,22 @@ async def convert_batch(
                 ),
                 encoding="utf-8",
             )
-            async with semaphores["html"]:
-                await runner.run(
-                    [
-                        *command_for(html_paper, input_path, staged_output),
-                        f"--lua-filter={_ARXIV_LUA_FILTER}",
-                    ],
-                    timeout=timeout_seconds,
-                )
+            # A rendering pandoc cannot convert is no rendering: the PDF may
+            # still work. A crash is remembered so the converter gets probed.
+            try:
+                async with semaphores["html"]:
+                    await runner.run(
+                        [
+                            *command_for(html_paper, input_path, staged_output),
+                            f"--lua-filter={_ARXIV_LUA_FILTER}",
+                        ],
+                        timeout=timeout_seconds,
+                    )
+            except ConverterCrashError:
+                crashed_tools.setdefault(_PANDOC_TOOL, paper)
+                return False
+            except PaperError:
+                return False
             localize_inline_figures(
                 staged_output, staged_output.with_suffix(".figures")
             )
@@ -557,12 +566,14 @@ async def convert_batch(
         tool = _PANDOC_TOOL
         try:
             staged_output = _staged_output_path(workspace, paper)
-            if paper.arxiv_id is not None and await convert_arxiv_html(
-                paper, staged_output
-            ):
-                return _PreparedConversion(
-                    paper=paper, staged_output=staged_output, error=None, tool=tool
-                )
+            if paper.arxiv_id is not None:
+                if await convert_arxiv_html(paper, staged_output):
+                    return _PreparedConversion(
+                        paper=paper, staged_output=staged_output, error=None, tool=tool
+                    )
+                # What a failed rendering left must not reach the next converter.
+                staged_output.unlink(missing_ok=True)
+                shutil.rmtree(staged_output.with_suffix(".figures"), ignore_errors=True)
             tool = _DOCLING_TOOL if paper.input_format == "pdf" else _PANDOC_TOOL
             if paper.input_format == "pdf" and not allow_pdf:
                 return _PreparedConversion(
@@ -603,6 +614,7 @@ async def convert_batch(
                 paper=paper, staged_output=staged_output, error=None, tool=tool
             )
         except ConverterCrashError as error:
+            crashed_tools.setdefault(tool, paper)
             return _PreparedConversion(
                 paper=paper,
                 staged_output=None,
@@ -673,6 +685,7 @@ async def convert_batch(
             )
         return True
 
+    crashed_tools: dict[str, Paper] = {}
     tasks = {asyncio.create_task(convert_one(paper)): paper for paper in batch.papers}
     results: list[_PreparedConversion] = []
     interrupted: list[Paper] = []
@@ -703,14 +716,13 @@ async def convert_batch(
                         "unexpected converter task failure"
                     ) from error
 
-        crashed = [result for result in results if result.crashed]
         # A success proves only its own converter: pandoc working says nothing
         # about docling. Any other converter that crashed must pass a probe, so
         # a broken install cannot strike papers, however many crashed.
         proven = {r.tool for r in results if r.staged_output is not None}
-        for tool in sorted({result.tool for result in crashed} - proven):
-            tool_crashes = [result for result in crashed if result.tool == tool]
-            if not await converter_works(tool, tool_crashes[0].paper):
+        for tool in sorted(crashed_tools.keys() - proven):
+            if not await converter_works(tool, crashed_tools[tool]):
+                tool_crashes = [r for r in results if r.crashed and r.tool == tool]
                 interrupted.extend(result.paper for result in tool_crashes)
                 results = [result for result in results if result not in tool_crashes]
 
