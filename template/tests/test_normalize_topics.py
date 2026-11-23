@@ -473,6 +473,170 @@ def test_deduplicate_gives_a_new_paper_one_identifier_in_any_source_order(
     assert [paper.identifier for paper in results[0]] == ["arxiv:2401.1v10"]
 
 
+@pytest.mark.parametrize("other_title", ["Paper B", "Paper A"])
+def test_deduplicate_report_with_another_arxiv_id_becomes_its_own_row(
+    source_record: SourceRecord, tmp_path: Path, other_title: str
+) -> None:
+    stored = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "title": "Paper A",
+                "doi": "10.1/shared",
+                "arxiv_id": "2401.00001",
+                "url": "https://arxiv.org/abs/2401.00001",
+                "input_url": "https://arxiv.org/pdf/2401.00001",
+            }
+        )
+    )
+    other = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "title": other_title,
+                "doi": "10.1/shared",
+                "arxiv_id": "2402.00002",
+                "url": "https://arxiv.org/abs/2402.00002",
+                "input_url": "https://arxiv.org/pdf/2402.00002",
+            }
+        )
+    )
+
+    rows = deduplicate([other], inventory=[stored])
+
+    assert rows == [stored, other]
+    assert len({expected_markdown(tmp_path, row) for row in rows}) == 2
+    assert deduplicate([stored, other], inventory=rows) == rows
+    assert deduplicate([other, stored]) == rows
+
+
+def test_deduplicate_report_adds_only_what_the_row_lacks(
+    source_record: SourceRecord,
+) -> None:
+    stored = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "title": "Stored Title",
+                "abstract": "",
+                "authors": (),
+                "doi": "10.1/journal",
+                "categories": ("cs.SD",),
+                "url": "https://publisher.example/paper",
+                "input_url": "https://publisher.example/paper.pdf",
+            }
+        )
+    )
+    report = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "title": "Reported Title",
+                "doi": "10.1/journal",
+                "arxiv_id": "2401.00001v2",
+                "categories": ("eess.AS",),
+                "url": "https://arxiv.org/abs/2401.00001v2",
+                "input_url": "https://arxiv.org/pdf/2401.00001v2",
+            }
+        )
+    )
+
+    [row] = deduplicate([report], inventory=[stored])
+
+    assert row == stored.model_copy(
+        update={
+            "abstract": report.abstract,
+            "authors": report.authors,
+            "categories": ("cs.SD", "eess.AS"),
+            "arxiv_id": "2401.00001v2",
+            "url": report.url,
+            "input_format": report.input_format,
+            "input_url": report.input_url,
+        }
+    )
+    assert deduplicate([report], inventory=[row]) == [row]
+
+
+def test_deduplicate_keeps_the_location_of_a_row_with_an_arxiv_id(
+    source_record: SourceRecord,
+) -> None:
+    stored = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "arxiv_id": "2401.00001",
+                "url": "https://publisher.example/paper",
+                "input_url": "https://publisher.example/paper.pdf",
+            }
+        )
+    )
+    report = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "title": "A Revised Title",
+                "arxiv_id": "2401.00001v2",
+                "url": "https://arxiv.org/abs/2401.00001v2",
+                "input_url": "https://arxiv.org/pdf/2401.00001v2",
+            }
+        )
+    )
+
+    assert deduplicate([report], inventory=[stored]) == [stored]
+
+
+def test_deduplicate_follows_a_doi_learned_from_a_report_in_the_same_run(
+    source_record: SourceRecord,
+) -> None:
+    stored = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "doi": "10.48550/arxiv.2401.00001",
+                "arxiv_id": "2401.00001",
+            }
+        )
+    )
+    bridge = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "doi": "10.1/journal",
+                "arxiv_id": "2401.00001",
+            }
+        )
+    )
+    journal = normalize(
+        source_record.model_copy(
+            update={"source": "crossref", "doi": "10.1/journal", "title": "Revised"}
+        )
+    )
+
+    assert deduplicate([journal, bridge], inventory=[stored]) == [stored]
+
+
+def test_deduplicate_rereporting_duplicate_rows_changes_neither(
+    source_record: SourceRecord,
+) -> None:
+    first = normalize(
+        source_record.model_copy(
+            update={"source": "arxiv", "arxiv_id": "2401.00001", "categories": ("a",)}
+        )
+    )
+    second = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "arxiv_id": "2401.00001v2",
+                "doi": "10.1/second",
+                "categories": ("b",),
+            }
+        )
+    )
+
+    assert deduplicate([first, second], inventory=[first, second]) == [first, second]
+
+
 def test_declarative_gate_reports_exclusion(
     topic_config: TopicConfig, paper: Paper
 ) -> None:

@@ -1,6 +1,5 @@
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
 import re
 import unicodedata
 
@@ -21,14 +20,6 @@ _DEFAULT_SOURCE_RANK = max(SOURCE_RANK.values(), default=0) + 1
 # so this never matches one.
 STRIPPED_ARXIV_ID = re.compile(r"\d{7}(?:v\d+)?")
 _OLD_STYLE_ARXIV_ID = re.compile(r"[a-z-]+(?:\.[a-z-]+)?/(?P<number>\d{7})(?:v\d+)?")
-
-
-@dataclass
-class _Cluster:
-    paper: Paper
-    strong_keys: set[str]
-    identity_keys: set[str]
-    bibliographic_keys: set[str]
 
 
 def clean(value: str) -> str:
@@ -65,13 +56,13 @@ def normalize(record: SourceRecord) -> Paper:
 def deduplicate(
     papers: Iterable[Paper], *, inventory: Iterable[Paper] = ()
 ) -> list[Paper]:
-    """Merge reports of one paper, keeping every inventory row's identifier.
+    """Fold reports into rows, one row per identifier.
 
-    File names and failure history are keyed by identifier, so a row in the
-    inventory is never renamed and never merged into another row. Reports that
-    match a row enrich it, filling only strong IDs the row lacks and no other
-    row holds; the rest become new papers. The one replaced ID is an old-style
-    arXiv ID stored without its archive, repaired from the report of that paper.
+    A row's identity and content belong to it: file names and failure history
+    are keyed by its identifier, so rows are never renamed or merged. A report
+    of the same paper may only add what ``_enriched`` allows. A report whose
+    arXiv ID differs from its match's is another paper and gets its own row.
+    Reports run best-ranked first, so a new paper's row is its best report.
 
     Args:
         papers: Freshly fetched papers.
@@ -80,94 +71,109 @@ def deduplicate(
     Returns:
         The inventory rows and new papers, in output order.
     """
-    rows = [
-        _Cluster(
-            paper=paper,
-            strong_keys=_strong_keys(paper),
-            identity_keys=_identity_keys(paper),
-            bibliographic_keys={_bibliographic_key(paper)},
-        )
-        for paper in sorted(inventory, key=_preference_key)
-    ]
-    strong_index: dict[str, int] = {}
-    bibliographic_index: defaultdict[str, list[int]] = defaultdict(list)
+    rows = sorted(inventory, key=_preference_key)
+    by_identifier: dict[str, int] = {}
+    owners: dict[str, int] = {}
+    bibliographic: defaultdict[str, set[int]] = defaultdict(set)
     stripped_rows: defaultdict[str, list[int]] = defaultdict(list)
+
+    def remember(row_id: int, paper: Paper) -> None:
+        by_identifier.setdefault(paper.identifier, row_id)
+        for key in _identity_keys(paper):
+            owners.setdefault(key, row_id)
+        bibliographic[_bibliographic_key(paper)].add(row_id)
+
     for row_id, row in enumerate(rows):
-        if row.paper.arxiv_id and STRIPPED_ARXIV_ID.fullmatch(row.paper.arxiv_id):
-            stripped_rows[row.paper.arxiv_id[:7]].append(row_id)
-        for identity_key in row.identity_keys:
-            strong_index.setdefault(identity_key, row_id)
-        for bibliographic_key in row.bibliographic_keys:
-            bibliographic_index[bibliographic_key].append(row_id)
+        remember(row_id, row)
+        if row.arxiv_id and STRIPPED_ARXIV_ID.fullmatch(row.arxiv_id):
+            stripped_rows[row.arxiv_id[:7]].append(row_id)
 
-    new_papers: list[Paper] = []
-    for report in sorted(
-        _cluster_reports(papers), key=lambda cluster: _preference_key(cluster.paper)
-    ):
-        matches = {
-            strong_index[key] for key in report.identity_keys if key in strong_index
-        } | {
-            row_id
-            for key in report.bibliographic_keys
-            for row_id in bibliographic_index.get(key, ())
-            if _can_merge_bibliographically(
-                report.strong_keys, rows[row_id].strong_keys
-            )
-        }
-        repaired_row = _claim_stripped_row(report, rows, stripped_rows, strong_index)
-        if repaired_row is not None:
-            matches = {repaired_row}
-        if not matches:
-            new_papers.append(report.paper)
-            continue
-        row_id = min(matches)
-        row = rows[row_id]
-        doi = row.paper.doi
-        if not doi and strong_index.get(f"doi:{report.paper.doi}", row_id) == row_id:
-            doi = report.paper.doi
-        arxiv_id = row.paper.arxiv_id
-        if (
-            not arxiv_id
-            and report.paper.arxiv_id
-            and strong_index.get(_arxiv_key(report.paper.arxiv_id), row_id) == row_id
-        ):
-            arxiv_id = report.paper.arxiv_id
-        merged = _merge_clusters(row, report).paper
-        if repaired_row is not None:
-            arxiv_id = report.paper.arxiv_id
-            merged = row.paper.model_copy(
-                update={
-                    "categories": merged.categories,
-                    "url": report.paper.url,
-                    "input_format": report.paper.input_format,
-                    "input_url": report.paper.input_url,
-                }
-            )
-        enriched = merged.model_copy(
-            update={
-                "identifier": row.paper.identifier,
-                "doi": doi,
-                "arxiv_id": arxiv_id,
+    for report in sorted(papers, key=_preference_key):
+        row_id = by_identifier.get(report.identifier)
+        if row_id is None and report.arxiv_id:
+            row_id = owners.get(_arxiv_key(report.arxiv_id))
+        repaired = False
+        if row_id is None:
+            row_id = _claim_stripped_row(report, rows, stripped_rows)
+            repaired = row_id is not None
+        if row_id is None:
+            matches = {
+                match
+                for match in bibliographic.get(_bibliographic_key(report), ())
+                if _can_merge_bibliographically(
+                    _strong_keys(report), _strong_keys(rows[match])
+                )
             }
-        )
-        strong_keys = _strong_keys(enriched)
-        rows[row_id] = replace(
-            row,
-            paper=enriched,
-            strong_keys=strong_keys,
-            identity_keys=row.identity_keys | strong_keys,
-        )
-        for strong_key in strong_keys:
-            strong_index.setdefault(strong_key, row_id)
+            if report.doi and f"doi:{report.doi}" in owners:
+                matches.add(owners[f"doi:{report.doi}"])
+            if report.arxiv_id:
+                # This arXiv ID has no row, so a match holding any arXiv ID is
+                # a different paper that shares a DOI or a title.
+                matches = {
+                    match
+                    for match in matches
+                    if not any(
+                        key.startswith("arxiv:") for key in _identity_keys(rows[match])
+                    )
+                }
+            row_id = min(matches, default=None)
+        if row_id is None:
+            rows.append(report)
+            remember(len(rows) - 1, report)
+            continue
+        rows[row_id] = _enriched(rows[row_id], report, row_id, owners, repaired)
+        remember(row_id, rows[row_id])
+        remember(row_id, report)
 
-    return sorted([*(row.paper for row in rows), *new_papers], key=_output_key)
+    return sorted(rows, key=_output_key)
+
+
+def _enriched(
+    row: Paper, report: Paper, row_id: int, owners: dict[str, int], repaired: bool
+) -> Paper:
+    """Return the row with the only updates a report may make.
+
+    The report adds categories, an empty abstract or author list, and a missing
+    DOI or arXiv ID that no other row owns. An arXiv report that supplies the
+    row's arXiv ID also supplies its location, because the row's old input may
+    be a publisher link. A repaired old-style ID replaces the stored one and its
+    broken location.
+
+    Args:
+        row: The stored row.
+        report: A report of the same paper.
+        row_id: The row's position.
+        owners: Row position by identity key.
+        repaired: Whether the report repairs the row's stripped arXiv ID.
+
+    Returns:
+        The updated row.
+    """
+    update: dict[str, object] = {}
+    if not {*report.categories} <= {*row.categories}:
+        update["categories"] = tuple(sorted({*row.categories, *report.categories}))
+    if not row.abstract and report.abstract:
+        update["abstract"] = report.abstract
+    if not row.authors and report.authors:
+        update["authors"] = report.authors
+    if not row.doi and report.doi and owners.get(f"doi:{report.doi}", row_id) == row_id:
+        update["doi"] = report.doi
+    learns_arxiv_id = (
+        not row.arxiv_id
+        and report.arxiv_id is not None
+        and owners.get(_arxiv_key(report.arxiv_id), row_id) == row_id
+    )
+    if repaired or learns_arxiv_id:
+        update["arxiv_id"] = report.arxiv_id
+    if repaired or (learns_arxiv_id and report.source == "arxiv"):
+        update["url"] = report.url
+        update["input_format"] = report.input_format
+        update["input_url"] = report.input_url
+    return row.model_copy(update=update)
 
 
 def _claim_stripped_row(
-    report: _Cluster,
-    rows: list[_Cluster],
-    stripped_rows: dict[str, list[int]],
-    strong_index: dict[str, int],
+    report: Paper, rows: list[Paper], stripped_rows: dict[str, list[int]]
 ) -> int | None:
     """Return the row holding this report's old-style ID without its archive.
 
@@ -176,118 +182,26 @@ def _claim_stripped_row(
     or its title and date. A claimed row leaves ``stripped_rows``.
 
     Args:
-        report: The report cluster.
-        rows: The inventory rows.
+        report: The report.
+        rows: The rows.
         stripped_rows: Row positions by seven-digit number.
-        strong_index: Row position by identity key.
 
     Returns:
         The row position, or None when no stripped row is this paper.
     """
-    arxiv_id = report.paper.arxiv_id
+    arxiv_id = report.arxiv_id
     old_style = _OLD_STYLE_ARXIV_ID.fullmatch(arxiv_id) if arxiv_id else None
-    if arxiv_id is None or old_style is None or _arxiv_key(arxiv_id) in strong_index:
+    if old_style is None:
         return None
     candidates = stripped_rows.get(old_style["number"], [])
     for row_id in candidates:
-        stored = rows[row_id].paper
-        if (
-            stored.published == report.paper.published
-            or _bibliographic_key(stored) in report.bibliographic_keys
-        ):
+        stored = rows[row_id]
+        if stored.published == report.published or _bibliographic_key(
+            stored
+        ) == _bibliographic_key(report):
             candidates.remove(row_id)
             return row_id
     return None
-
-
-def _cluster_reports(papers: Iterable[Paper]) -> list[_Cluster]:
-    clusters: dict[int, _Cluster] = {}
-    strong_index: dict[str, int] = {}
-    bibliographic_index: dict[str, int] = {}
-    next_cluster_id = 0
-
-    for paper in sorted(papers, key=_processing_key):
-        paper_strong_keys = _strong_keys(paper)
-        paper_identity_keys = _identity_keys(paper)
-        paper_bibliographic_key = _bibliographic_key(paper)
-        candidate_ids = {
-            strong_index[key] for key in paper_identity_keys if key in strong_index
-        }
-        bibliographic_candidate = bibliographic_index.get(paper_bibliographic_key)
-        if bibliographic_candidate is not None:
-            cluster = clusters[bibliographic_candidate]
-            if _can_merge_bibliographically(paper_strong_keys, cluster.strong_keys):
-                candidate_ids.add(bibliographic_candidate)
-
-        if candidate_ids:
-            cluster_id = min(candidate_ids)
-            merged_cluster = _Cluster(
-                paper=paper,
-                strong_keys=set(),
-                identity_keys=set(),
-                bibliographic_keys=set(),
-            )
-            for candidate_id in sorted(candidate_ids):
-                candidate_cluster = clusters.pop(candidate_id)
-                merged_cluster = _merge_clusters(merged_cluster, candidate_cluster)
-            merged_cluster = _merge_clusters(
-                merged_cluster,
-                _Cluster(
-                    paper=paper,
-                    strong_keys=paper_strong_keys,
-                    identity_keys=paper_identity_keys,
-                    bibliographic_keys={paper_bibliographic_key},
-                ),
-            )
-            clusters[cluster_id] = merged_cluster
-        else:
-            cluster_id = next_cluster_id
-            next_cluster_id += 1
-            clusters[cluster_id] = _Cluster(
-                paper=paper,
-                strong_keys=paper_strong_keys,
-                identity_keys=paper_identity_keys,
-                bibliographic_keys={paper_bibliographic_key},
-            )
-
-        _reindex(strong_index, bibliographic_index, clusters)
-
-    return list(clusters.values())
-
-
-def _merge_clusters(left: _Cluster, right: _Cluster) -> _Cluster:
-    preferred = min((left.paper, right.paper), key=_preference_key)
-    other = right.paper if preferred == left.paper else left.paper
-    categories = tuple(sorted({*left.paper.categories, *right.paper.categories}))
-    doi = _merge_identifier_value(preferred.doi, other.doi)
-    arxiv_id = _merge_identifier_value(preferred.arxiv_id, other.arxiv_id)
-    return _Cluster(
-        paper=preferred.model_copy(
-            update={
-                "identifier": _merged_identifier(preferred, doi=doi, arxiv_id=arxiv_id),
-                "categories": categories,
-                "doi": doi,
-                "arxiv_id": arxiv_id,
-            }
-        ),
-        strong_keys=left.strong_keys | right.strong_keys,
-        identity_keys=left.identity_keys | right.identity_keys,
-        bibliographic_keys=left.bibliographic_keys | right.bibliographic_keys,
-    )
-
-
-def _reindex(
-    strong_index: dict[str, int],
-    bibliographic_index: dict[str, int],
-    clusters: dict[int, _Cluster],
-) -> None:
-    strong_index.clear()
-    bibliographic_index.clear()
-    for cluster_id, cluster in clusters.items():
-        for identity_key in cluster.identity_keys:
-            strong_index[identity_key] = cluster_id
-        for bibliographic_key in cluster.bibliographic_keys:
-            bibliographic_index[bibliographic_key] = cluster_id
 
 
 def _identifier(
@@ -319,20 +233,6 @@ def _canonical_arxiv_id(value: str | None) -> str | None:
     if cleaned is None:
         return None
     return re.sub(r"(?i)^arxiv:\s*", "", cleaned).casefold()
-
-
-def _merge_identifier_value(preferred: str | None, other: str | None) -> str | None:
-    return preferred or other
-
-
-def _merged_identifier(
-    preferred: Paper, *, doi: str | None, arxiv_id: str | None
-) -> str:
-    if arxiv_id:
-        return f"arxiv:{arxiv_id}"
-    if doi:
-        return f"doi:{doi}"
-    return preferred.identifier
 
 
 def _strong_keys(paper: Paper) -> set[str]:
@@ -381,21 +281,13 @@ def _can_merge_bibliographically(
     )
 
 
-def _processing_key(paper: Paper) -> tuple[int, int, str, str]:
-    return (
-        _strong_priority(paper),
-        _source_rank(paper.source),
-        paper.identifier.casefold(),
-        _bibliographic_key(paper),
-    )
-
-
-def _preference_key(paper: Paper) -> tuple[int, int, str, str]:
+def _preference_key(paper: Paper) -> tuple[int, int, str, str, str]:
     return (
         _strong_priority(paper),
         _source_rank(paper.source),
         paper.identifier.casefold(),
         paper.url,
+        _bibliographic_key(paper),
     )
 
 
