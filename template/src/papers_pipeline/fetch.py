@@ -49,12 +49,13 @@ class _WindowFetch:
     rejected: int
     error_events: list[str]
     pages: int
+    unavailable: SourceUnavailableError | None
 
 
 @dataclass(frozen=True)
 class _BackfillFetch:
     records: list[SourceRecord]
-    progress: BackfillProgress
+    progress: BackfillProgress | None
     capped: bool
     rejected: int
     events: list[str]
@@ -118,48 +119,36 @@ async def fetch_all(
         )
         starting_cursor = continuation.cursor if continuation else None
 
-        try:
-            async with client_factory(deadline) as client:
-                forward = await _fetch_window(
+        async with client_factory(deadline) as client:
+            forward = await _fetch_window(
+                adapter,
+                config,
+                adapter_index,
+                window,
+                starting_cursor,
+                client,
+                max_pages=adapter_config.max_pages,
+                max_results=adapter_config.max_results,
+            )
+            history = (
+                await _backfill(
                     adapter,
                     config,
                     adapter_index,
-                    window,
-                    starting_cursor,
+                    backfill.get(adapter.name),
+                    window.start,
                     client,
-                    max_pages=adapter_config.max_pages,
-                    max_results=adapter_config.max_results,
                 )
-                history: _BackfillFetch | None = None
-                try:
-                    history = await _backfill(
-                        adapter,
-                        config,
-                        adapter_index,
-                        backfill.get(adapter.name),
-                        window.start,
-                        client,
-                    )
-                except SourceUnavailableError as error:
-                    # The forward result stands; backfill progress stays put.
-                    events.append(
-                        f"{adapter.name}: backfill unavailable this run: {error}"
-                    )
-                events.extend(_prefix_events(adapter.name, client.events))
-        except SourceUnavailableError as error:
-            # One source's outage should not stop the others or conversion;
-            # its cursor and backfill progress stay put for the next run.
-            events.append(f"{adapter.name}: source unavailable this run: {error}")
-            stats.append(
-                FetchStats(
-                    source=adapter.name,
-                    fetched=0,
-                    rejected=0,
-                    capped=False,
-                    complete=False,
-                )
+                if forward.unavailable is None
+                else None
             )
-            continue
+            events.extend(_prefix_events(adapter.name, client.events))
+        if forward.unavailable is not None:
+            # One source's outage should not stop the others or conversion;
+            # the pages it already returned are kept and it resumes next run.
+            events.append(
+                f"{adapter.name}: source unavailable this run: {forward.unavailable}"
+            )
         events.extend(forward.error_events)
 
         if forward.cursor is not None:
@@ -184,7 +173,8 @@ async def fetch_all(
         source_records = forward.records
         rejected = forward.rejected
         if history is not None:
-            backfill[adapter.name] = history.progress
+            if history.progress is not None:
+                backfill[adapter.name] = history.progress
             events.extend(history.events)
             source_records = [*source_records, *history.records]
             rejected += history.rejected
@@ -271,7 +261,9 @@ async def _backfill(
     pages_left = adapter_config.max_pages
     results_left = adapter_config.max_results
     covered_from = plan.covered_from
+    starting_covered_from = covered_from
     continuation: SourceContinuation | None = None
+    unavailable: SourceUnavailableError | None = None
     while plan is not None and pages_left > 0 and results_left > 0:
         chunk = await _fetch_window(
             adapter,
@@ -288,12 +280,15 @@ async def _backfill(
         records.extend(chunk.records)
         rejected += chunk.rejected
         error_events.extend(chunk.error_events)
+        unavailable = chunk.unavailable
         if chunk.cursor is not None:
             continuation = SourceContinuation(
                 cursor=chunk.cursor,
                 window_start=plan.window.start,
                 window_end=plan.window.end,
             )
+            break
+        if unavailable is not None:
             break
         # A complete chunk, or one capped without a cursor, moves the boundary
         # back; the latter cannot be resumed.
@@ -303,7 +298,9 @@ async def _backfill(
         )
 
     covered = covered_from.date().isoformat()
-    if continuation is not None:
+    if unavailable is not None:
+        summary = f"{adapter.name}: backfill unavailable this run: {unavailable}"
+    elif continuation is not None:
         summary = (
             f"{adapter.name}: backfill cap reached at {covered}; continuation persisted"
         )
@@ -313,8 +310,12 @@ async def _backfill(
         summary = f"{adapter.name}: backfilled to {covered}"
     return _BackfillFetch(
         records=records,
-        progress=BackfillProgress(covered_from=covered_from, continuation=continuation),
-        capped=continuation is not None,
+        progress=(
+            BackfillProgress(covered_from=covered_from, continuation=continuation)
+            if continuation is not None or covered_from != starting_covered_from
+            else progress
+        ),
+        capped=continuation is not None and unavailable is None,
         rejected=rejected,
         events=[*error_events, summary],
     )
@@ -338,11 +339,17 @@ async def _fetch_window(
     capped = False
     complete = False
     pages_fetched = 0
+    unavailable: SourceUnavailableError | None = None
     while pages_fetched < max_pages:
         remaining = max_results - len(records)
-        page = await adapter.fetch(
-            window, cursor, client, _page_config(config, adapter_index, remaining)
-        )
+        try:
+            page = await adapter.fetch(
+                window, cursor, client, _page_config(config, adapter_index, remaining)
+            )
+        except SourceUnavailableError as error:
+            # Pages already returned stand; cursor still points at this page.
+            unavailable = error
+            break
         pages_fetched += 1
         error_events.extend(_page_error_events(adapter.name, page))
         rejected += len(page.permanent_errors)
@@ -370,4 +377,5 @@ async def _fetch_window(
         rejected=rejected,
         error_events=error_events,
         pages=pages_fetched,
+        unavailable=unavailable,
     )

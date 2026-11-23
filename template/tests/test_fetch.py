@@ -998,3 +998,106 @@ async def test_unreachable_semantic_scholar_results_keep_the_last_success() -> N
     assert result.stats[0].complete is False
     assert result.state.continuations == {}
     assert result.state.fetched_through[adapter.name] == last_success
+
+
+@pytest.mark.asyncio
+async def test_deadline_mid_adapter_keeps_completed_pages_and_resumes() -> None:
+    config = pipeline_config(
+        adapter_config(
+            "semantic_scholar",
+            lookback_days=7,
+            page_size=1,
+            max_pages=10,
+            max_results=10,
+        )
+    )
+    published = (NOW - timedelta(days=1)).date().isoformat()
+    clock = [0.0]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        # The shared deadline expires while the first page is in flight.
+        clock[0] = 1000.0
+        body: dict[str, object] = {
+            "total": 2,
+            "data": [
+                {
+                    "paperId": f"paper-{offset}",
+                    "title": f"Paper {offset}",
+                    "publicationDate": published,
+                    "openAccessPdf": {"url": f"https://example.test/{offset}.pdf"},
+                }
+            ]
+            if offset < 2
+            else [],
+        }
+        return httpx.Response(200, json=body)
+
+    adapter = SemanticScholarAdapter("key")
+    expired = await fetch_all(
+        config,
+        PipelineState(),
+        {adapter.name: adapter},
+        lambda _: RequestClient(
+            config.fetch,
+            Deadline.start(60, clock=lambda: clock[0]),
+            transport=httpx.MockTransport(handle),
+        ),
+        NOW,
+    )
+
+    assert [record.source_id for record in expired.records] == ["paper-0"]
+    assert adapter.name in expired.state.continuations
+    assert expired.state.fetched_through == {}
+    assert expired.stats[0].complete is False
+    assert any("fetch deadline exceeded" in event for event in expired.events)
+
+    resumed = await fetch_all(
+        config,
+        expired.state,
+        {adapter.name: adapter},
+        lambda deadline: RequestClient(
+            config.fetch, deadline, transport=httpx.MockTransport(handle)
+        ),
+        NOW,
+    )
+
+    assert [record.source_id for record in resumed.records] == ["paper-1"]
+    assert resumed.state.continuations == {}
+    assert resumed.state.fetched_through == {adapter.name: NOW}
+
+
+@pytest.mark.asyncio
+async def test_backfill_outage_keeps_completed_history_pages() -> None:
+    config = backfill_config(date(2000, 1, 1))
+    old = source_record("arxiv", "old", published=NOW - timedelta(days=20))
+
+    @dataclass
+    class HistoryThenFailing(RecordingAdapter):
+        async def fetch(
+            self,
+            window: FetchWindow,
+            cursor: str | None,
+            client: RequestClient,
+            config: AdapterConfig,
+        ) -> FetchPage:
+            self.windows.append(window)
+            if len(self.windows) == 1:
+                return page()
+            if len(self.windows) == 2:
+                return page(old, next_cursor="history-2")
+            raise SourceUnavailableError("fetch deadline exceeded")
+
+    adapter = HistoryThenFailing("arxiv")
+    factory, _, _ = client_factory(config.fetch)
+
+    result = await fetch_all(config, PipelineState(), {"arxiv": adapter}, factory, NOW)
+
+    assert result.records == (old,)
+    progress = result.state.backfill["arxiv"]
+    assert progress.covered_from == NOW - timedelta(days=7)
+    assert progress.continuation == SourceContinuation(
+        cursor="history-2",
+        window_start=adapter.windows[1].start,
+        window_end=adapter.windows[1].end,
+    )
