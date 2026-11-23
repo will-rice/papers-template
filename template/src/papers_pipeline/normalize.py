@@ -23,6 +23,7 @@ _DEFAULT_SOURCE_RANK = max(SOURCE_RANK.values(), default=0) + 1
 class _Cluster:
     paper: Paper
     strong_keys: set[str]
+    identity_keys: set[str]
     bibliographic_keys: set[str]
 
 
@@ -64,7 +65,8 @@ def deduplicate(
 
     File names and failure history are keyed by identifier, so a row in the
     inventory is never renamed and never merged into another row. Reports that
-    match a row enrich it; the rest become new papers.
+    match a row enrich it, filling only strong IDs the row lacks and no other
+    row holds; the rest become new papers.
 
     Args:
         papers: Freshly fetched papers.
@@ -77,6 +79,7 @@ def deduplicate(
         _Cluster(
             paper=paper,
             strong_keys=_strong_keys(paper),
+            identity_keys=_identity_keys(paper),
             bibliographic_keys={_bibliographic_key(paper)},
         )
         for paper in sorted(inventory, key=_preference_key)
@@ -84,8 +87,8 @@ def deduplicate(
     strong_index: dict[str, int] = {}
     bibliographic_index: defaultdict[str, list[int]] = defaultdict(list)
     for row_id, row in enumerate(rows):
-        for strong_key in row.strong_keys:
-            strong_index.setdefault(strong_key, row_id)
+        for identity_key in row.identity_keys:
+            strong_index.setdefault(identity_key, row_id)
         for bibliographic_key in row.bibliographic_keys:
             bibliographic_index[bibliographic_key].append(row_id)
 
@@ -94,7 +97,7 @@ def deduplicate(
         _cluster_reports(papers), key=lambda cluster: _preference_key(cluster.paper)
     ):
         matches = {
-            strong_index[key] for key in report.strong_keys if key in strong_index
+            strong_index[key] for key in report.identity_keys if key in strong_index
         } | {
             row_id
             for key in report.bibliographic_keys
@@ -108,11 +111,32 @@ def deduplicate(
             continue
         row_id = min(matches)
         row = rows[row_id]
-        enriched = _merge_clusters(row, report).paper
+        doi = row.paper.doi
+        if not doi and strong_index.get(f"doi:{report.paper.doi}", row_id) == row_id:
+            doi = report.paper.doi
+        arxiv_id = row.paper.arxiv_id
+        if (
+            not arxiv_id
+            and report.paper.arxiv_id
+            and strong_index.get(_arxiv_key(report.paper.arxiv_id), row_id) == row_id
+        ):
+            arxiv_id = report.paper.arxiv_id
+        enriched = _merge_clusters(row, report).paper.model_copy(
+            update={
+                "identifier": row.paper.identifier,
+                "doi": doi,
+                "arxiv_id": arxiv_id,
+            }
+        )
+        strong_keys = _strong_keys(enriched)
         rows[row_id] = replace(
             row,
-            paper=enriched.model_copy(update={"identifier": row.paper.identifier}),
+            paper=enriched,
+            strong_keys=strong_keys,
+            identity_keys=row.identity_keys | strong_keys,
         )
+        for strong_key in strong_keys:
+            strong_index.setdefault(strong_key, row_id)
 
     return sorted([*(row.paper for row in rows), *new_papers], key=_output_key)
 
@@ -125,9 +149,10 @@ def _cluster_reports(papers: Iterable[Paper]) -> list[_Cluster]:
 
     for paper in sorted(papers, key=_processing_key):
         paper_strong_keys = _strong_keys(paper)
+        paper_identity_keys = _identity_keys(paper)
         paper_bibliographic_key = _bibliographic_key(paper)
         candidate_ids = {
-            strong_index[key] for key in paper_strong_keys if key in strong_index
+            strong_index[key] for key in paper_identity_keys if key in strong_index
         }
         bibliographic_candidate = bibliographic_index.get(paper_bibliographic_key)
         if bibliographic_candidate is not None:
@@ -140,6 +165,7 @@ def _cluster_reports(papers: Iterable[Paper]) -> list[_Cluster]:
             merged_cluster = _Cluster(
                 paper=paper,
                 strong_keys=set(),
+                identity_keys=set(),
                 bibliographic_keys=set(),
             )
             for candidate_id in sorted(candidate_ids):
@@ -150,6 +176,7 @@ def _cluster_reports(papers: Iterable[Paper]) -> list[_Cluster]:
                 _Cluster(
                     paper=paper,
                     strong_keys=paper_strong_keys,
+                    identity_keys=paper_identity_keys,
                     bibliographic_keys={paper_bibliographic_key},
                 ),
             )
@@ -160,6 +187,7 @@ def _cluster_reports(papers: Iterable[Paper]) -> list[_Cluster]:
             clusters[cluster_id] = _Cluster(
                 paper=paper,
                 strong_keys=paper_strong_keys,
+                identity_keys=paper_identity_keys,
                 bibliographic_keys={paper_bibliographic_key},
             )
 
@@ -184,6 +212,7 @@ def _merge_clusters(left: _Cluster, right: _Cluster) -> _Cluster:
             }
         ),
         strong_keys=left.strong_keys | right.strong_keys,
+        identity_keys=left.identity_keys | right.identity_keys,
         bibliographic_keys=left.bibliographic_keys | right.bibliographic_keys,
     )
 
@@ -196,8 +225,8 @@ def _reindex(
     strong_index.clear()
     bibliographic_index.clear()
     for cluster_id, cluster in clusters.items():
-        for strong_key in cluster.strong_keys:
-            strong_index[strong_key] = cluster_id
+        for identity_key in cluster.identity_keys:
+            strong_index[identity_key] = cluster_id
         for bibliographic_key in cluster.bibliographic_keys:
             bibliographic_index[bibliographic_key] = cluster_id
 
@@ -254,10 +283,26 @@ def _strong_keys(paper: Paper) -> set[str]:
     if arxiv_id:
         # Versions of one arXiv paper are the same paper; deduplicate keeps the
         # inventory's identifier for it, so file names are stable.
-        keys.add(f"arxiv:{re.sub(r'v\d+$', '', arxiv_id)}")
+        keys.add(_arxiv_key(arxiv_id))
     if doi:
         keys.add(f"doi:{doi}")
     return keys
+
+
+def _arxiv_key(arxiv_id: str) -> str:
+    return f"arxiv:{re.sub(r'v\d+$', '', arxiv_id)}"
+
+
+def _identity_keys(paper: Paper) -> set[str]:
+    """Return the strong keys plus the key of the paper's own identifier.
+
+    A stored identifier can name an ID the row no longer carries, and a paper
+    with no strong ID is known only by its identifier.
+    """
+    identifier = paper.identifier
+    if identifier.startswith("arxiv:"):
+        identifier = _arxiv_key(identifier.removeprefix("arxiv:"))
+    return _strong_keys(paper) | {identifier}
 
 
 def _bibliographic_key(paper: Paper) -> str:

@@ -253,6 +253,108 @@ def test_deduplicate_never_merges_two_inventory_rows(
     }
 
 
+def test_deduplicate_keeps_a_rows_doi_when_a_report_carries_another(
+    source_record: SourceRecord,
+) -> None:
+    stored = normalize(
+        source_record.model_copy(update={"source": "crossref", "doi": "10.1/journal"})
+    )
+    learned_arxiv = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "doi": "10.1/journal",
+                "arxiv_id": "2401.00001",
+            }
+        )
+    )
+    arxiv_doi = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "doi": "10.48550/arxiv.2401.00001",
+                "arxiv_id": "2401.00001",
+            }
+        )
+    )
+    revised = normalize(
+        source_record.model_copy(
+            update={"source": "crossref", "doi": "10.1/journal", "title": "Revised"}
+        )
+    )
+
+    [row] = deduplicate([learned_arxiv], inventory=[stored])
+    [row] = deduplicate([arxiv_doi], inventory=[row])
+    assert (row.identifier, row.doi) == ("doi:10.1/journal", "10.1/journal")
+    assert row.arxiv_id == "2401.00001"
+
+    [row] = deduplicate([revised], inventory=[row])
+    assert row.identifier == "doi:10.1/journal"
+
+
+def test_deduplicate_matches_a_row_whose_doi_was_already_replaced(
+    source_record: SourceRecord,
+) -> None:
+    damaged = normalize(
+        source_record.model_copy(
+            update={
+                "source": "arxiv",
+                "doi": "10.48550/arxiv.2401.00001",
+                "arxiv_id": "2401.00001",
+            }
+        )
+    ).model_copy(update={"identifier": "doi:10.1/journal"})
+    revised = normalize(
+        source_record.model_copy(
+            update={"source": "crossref", "doi": "10.1/journal", "title": "Revised"}
+        )
+    )
+
+    assert [
+        paper.identifier for paper in deduplicate([revised], inventory=[damaged])
+    ] == ["doi:10.1/journal"]
+
+
+def test_deduplicate_matches_a_source_identifier_with_a_revised_title(
+    source_record: SourceRecord,
+) -> None:
+    stored = normalize(source_record)
+    revised = normalize(source_record.model_copy(update={"title": "Revised"}))
+
+    assert len(deduplicate([revised], inventory=[stored])) == 1
+    assert len(deduplicate([stored, revised])) == 1
+
+
+def test_deduplicate_row_does_not_learn_an_id_another_row_owns(
+    source_record: SourceRecord,
+) -> None:
+    by_arxiv = normalize(
+        source_record.model_copy(update={"source": "arxiv", "arxiv_id": "2401.1"})
+    )
+    by_doi = normalize(
+        source_record.model_copy(
+            update={"source": "crossref", "doi": "10.1000/abc", "title": "Other"}
+        )
+    )
+    bridge = normalize(
+        source_record.model_copy(
+            update={
+                "source": "semantic_scholar",
+                "arxiv_id": "2401.1",
+                "doi": "10.1000/abc",
+            }
+        )
+    )
+
+    rows = {
+        paper.identifier: paper
+        for paper in deduplicate([bridge], inventory=[by_doi, by_arxiv])
+    }
+
+    assert rows[by_doi.identifier].arxiv_id is None
+    assert rows[by_arxiv.identifier].doi is None
+
+
 def test_deduplicate_gives_a_new_paper_one_identifier_in_any_source_order(
     source_record: SourceRecord,
 ) -> None:
