@@ -89,7 +89,9 @@ The supported `filters` are:
 - `huggingface` and `papers_with_code`: no filter keys
 
 Topic gates support `include_any`, `include_all`, `exclude_any`, and
-`categories`. Set `plugin: topic_plugin:accept_topic` only when these gates
+`categories`. Terms match whole words in the title and abstract, ignoring case,
+with a simple plural on the last word; spaces and hyphens in a term are
+interchangeable. End a term with `*` to match any word ending (`vocaliz*`). Set `plugin: topic_plugin:accept_topic` only when these gates
 cannot express the repository rule; the plugin accepts `Paper` and returns
 `TopicDecision`.
 
