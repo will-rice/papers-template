@@ -3,8 +3,10 @@ import base64
 import binascii
 import hashlib
 import locale
+import os
 import re
 import shutil
+import signal
 import subprocess
 from io import BytesIO
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -99,6 +101,7 @@ class CommandRunner:
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as error:
             raise InfrastructureError(f"missing conversion tool: {argv[0]}") from error
@@ -148,8 +151,13 @@ class CommandRunner:
                 f" memory limit: {argv[0]}"
             )
 
-        stdout = _decode_output(await stdout_task)
-        stderr = _decode_output(await stderr_task)
+        stdout, stderr = await asyncio.shield(
+            _terminate_process(
+                process,
+                stdout_task=stdout_task,
+                stderr_task=stderr_task,
+            )
+        )
         assert process.returncode is not None
         completed = subprocess.CompletedProcess(
             args=list(argv),
@@ -196,7 +204,8 @@ async def _wait_within_memory(
     try:
         while True:
             done, _ = await asyncio.wait({exited}, timeout=MEMORY_SAMPLE_SECONDS)
-            if done:
+            # process.wait() also waits for the pipes, which a descendant can hold.
+            if done or process.returncode is not None:
                 return False
             try:
                 root = psutil.Process(process.pid)
@@ -230,23 +239,30 @@ async def _terminate_process(
     stderr_task: asyncio.Task[bytes],
 ) -> tuple[str, str]:
     if process.returncode is None:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-
+        _signal_group(process, signal.SIGTERM)
         try:
             await asyncio.wait_for(process.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
         except asyncio.TimeoutError:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            await process.wait()
+            pass
 
-    stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+    # The leader may be gone while descendants still hold the output pipes.
+    _signal_group(process, signal.SIGKILL)
+    streams = (stdout_task, stderr_task)
+    _, unfinished = await asyncio.wait(streams, timeout=_PROCESS_SHUTDOWN_TIMEOUT)
+    for task in unfinished:
+        task.cancel()
+    await asyncio.gather(*unfinished, return_exceptions=True)
+    stdout, stderr = (b"" if task in unfinished else task.result() for task in streams)
     return _decode_output(stdout), _decode_output(stderr)
+
+
+def _signal_group(process: asyncio.subprocess.Process, signum: signal.Signals) -> None:
+    """Signal the converter's process group, which its session leader created."""
+    try:
+        os.killpg(process.pid, signum)
+    # macOS reports EPERM for a group whose only members are zombies.
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _decode_output(data: bytes) -> str:

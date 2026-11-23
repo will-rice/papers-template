@@ -270,6 +270,67 @@ async def test_command_runner_cancellation_terminates_child(
     await _assert_process_gone(pid)
 
 
+def _background_child_script(pid_file: Path, leader: str) -> str:
+    """Shell that leaves a TERM-ignoring child holding the pipes, then runs leader."""
+    return (
+        "trap '' TERM; sleep 30 & "
+        f"echo $! > {pid_file}.tmp; mv {pid_file}.tmp {pid_file}; {leader}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "memory_limit", "timeout", "expected"),
+    [
+        ("sleep 30", 1024**3, 1.0, "timed out"),
+        ("sleep 30", 1, 20.0, "memory limit"),
+    ],
+    ids=["timeout", "memory"],
+)
+async def test_command_runner_failure_kills_descendants_holding_pipes(
+    tmp_path: Path, leader: str, memory_limit: int, timeout: float, expected: str
+) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    argv = ["sh", "-c", _background_child_script(pid_file, leader)]
+
+    async with asyncio.timeout(15):
+        with pytest.raises(PaperError, match=expected):
+            await CommandRunner(memory_limit_bytes=memory_limit).run(argv, timeout)
+
+    await _assert_process_gone(int((await _wait_for_file(pid_file)).strip()))
+
+
+@pytest.mark.asyncio
+async def test_command_runner_cancellation_kills_descendants_holding_pipes(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    argv = ["sh", "-c", _background_child_script(pid_file, "sleep 30")]
+    task = asyncio.create_task(CommandRunner().run(argv, timeout=20))
+    pid = int((await _wait_for_file(pid_file)).strip())
+
+    task.cancel()
+    async with asyncio.timeout(15):
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    await _assert_process_gone(pid)
+
+
+@pytest.mark.asyncio
+async def test_command_runner_success_does_not_wait_for_background_descendant(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    argv = ["sh", "-c", _background_child_script(pid_file, "echo done")]
+
+    async with asyncio.timeout(15):
+        result = await CommandRunner().run(argv, timeout=25)
+
+    assert result.stdout == "done\n"
+    await _assert_process_gone(int((await _wait_for_file(pid_file)).strip()))
+
+
 @pytest.mark.asyncio
 async def test_command_runner_isolates_recognized_corrupt_document_failure() -> None:
     with pytest.raises(PaperError, match="corrupt input document") as exc_info:
