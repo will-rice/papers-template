@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,13 +223,24 @@ async def test_command_runner_timeout_terminates_child_and_preserves_output(
     tmp_path: Path,
 ) -> None:
     pid_file = tmp_path / "timeout.pid"
-    child = _sleeping_child_script(pid_file)
+    output_file = tmp_path / "timeout.ready"
+    child = _sleeping_child_script(pid_file, output_file)
+    task = asyncio.create_task(
+        CommandRunner().run([sys.executable, "-c", child], timeout=0.1)
+    )
+    # The task's first step spawns the child and has not yet armed the timeout.
+    # Blocking the event loop holds the timeout back until the child is ready.
+    await asyncio.sleep(0)
+    deadline = time.monotonic() + 60
+    while not output_file.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
 
     # One document outrunning the converter fails that paper, not the run.
     with pytest.raises(PaperError, match="conversion timed out after 0s:") as exc_info:
-        await CommandRunner().run([sys.executable, "-c", child], timeout=0.1)
+        await task
 
-    pid = int((await _wait_for_file(pid_file)).strip())
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
     await _assert_process_gone(pid)
     timeout_error = exc_info.value.__cause__
     assert isinstance(timeout_error, subprocess.TimeoutExpired)
@@ -1716,13 +1728,21 @@ def _write_converter_output(argv: Sequence[str], input_path: Path) -> None:
     )
 
 
-def _sleeping_child_script(pid_file: Path) -> str:
+def _sleeping_child_script(pid_file: Path, ready_file: Path | None = None) -> str:
+    """Child that records its pid, writes to both pipes, then sleeps.
+
+    Args:
+        pid_file: Receives the child's pid.
+        ready_file: Created once both pipes hold the child's output.
+    """
+    signal_ready = "" if ready_file is None else f"Path({str(ready_file)!r}).touch(); "
     return (
         "from pathlib import Path; "
         "import os, sys, time; "
         f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
         "print('ready', flush=True); "
         "print('waiting', file=sys.stderr, flush=True); "
+        f"{signal_ready}"
         "time.sleep(30)"
     )
 
