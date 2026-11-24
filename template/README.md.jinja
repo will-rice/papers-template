@@ -60,6 +60,11 @@ Semantic Scholar reads its API key from `SEMANTIC_SCHOLAR_API_KEY` when
 with `secret_env: null` it runs unauthenticated at a shared, low rate limit.
 Other adapters use `secret_env: null`.
 
+Each arXiv run also sweeps papers updated inside its window, so a paper announced
+late, or one that gains a topic term in a later version, is still found. For
+Hugging Face, `max_pages` counts days, each read whole, because a day's list is
+ranked by live upvotes and a position in it does not survive between runs.
+
 To fill in a source's history, set `backfill_start` (a date) on an arXiv,
 Semantic Scholar, bioRxiv, or Hugging Face adapter; set it to `1991-08-01` for
 the whole of arXiv. After its `lookback_days` window, each nightly run keeps
