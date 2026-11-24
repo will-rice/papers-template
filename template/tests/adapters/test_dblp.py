@@ -60,7 +60,7 @@ async def test_dblp_continuation_cursor_is_deterministic_and_opaque(
 
 
 @pytest.mark.asyncio
-async def test_dblp_max_pages_sets_capped_without_dropping_cursor(
+async def test_dblp_leaves_the_page_budget_to_the_fetch_loop(
     dblp_client: RequestClient,
     dblp_config: AdapterConfig,
 ) -> None:
@@ -86,7 +86,7 @@ async def test_dblp_max_pages_sets_capped_without_dropping_cursor(
     )
 
     assert second_page.next_cursor
-    assert second_page.capped is True
+    assert second_page.capped is False
 
 
 @pytest.mark.asyncio

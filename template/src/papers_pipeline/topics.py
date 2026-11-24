@@ -5,7 +5,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from papers_pipeline.config import TopicConfig
+from papers_pipeline.config import TopicConfig, term_pattern
 from papers_pipeline.errors import ConfigError
 from papers_pipeline.models import Paper
 
@@ -30,13 +30,18 @@ def build_topic_gate(config: TopicConfig) -> Callable[[Paper], TopicDecision]:
 
         return plugin_gate
 
+    patterns = {
+        term: term_pattern(term)
+        for term in (*config.exclude_any, *config.include_all, *config.include_any)
+    }
+
     def gate(paper: Paper) -> TopicDecision:
         text = _search_text(paper)
         for term in config.exclude_any:
-            if term.casefold() in text:
+            if patterns[term].search(text):
                 return TopicDecision(False, f"matched excluded term: {term}")
         missing_required_terms = [
-            term for term in config.include_all if term.casefold() not in text
+            term for term in config.include_all if not patterns[term].search(text)
         ]
         if missing_required_terms:
             return TopicDecision(
@@ -44,7 +49,7 @@ def build_topic_gate(config: TopicConfig) -> Callable[[Paper], TopicDecision]:
                 f"missing required terms: {', '.join(missing_required_terms)}",
             )
         if config.include_any and not any(
-            term.casefold() in text for term in config.include_any
+            patterns[term].search(text) for term in config.include_any
         ):
             return TopicDecision(
                 False,

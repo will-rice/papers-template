@@ -17,7 +17,12 @@ def with_front_matter(paper: Paper, markdown: str) -> str:
     block = yaml.safe_dump(
         _metadata(paper), sort_keys=False, allow_unicode=True, width=1_000_000
     )
-    return f"---\n{block}---\n\n{_FRONT_MATTER.sub('', markdown, count=1)}"
+    return f"---\n{block}---\n\n{without_front_matter(markdown)}"
+
+
+def without_front_matter(markdown: str) -> str:
+    """Return the markdown after its metadata block, if it has one."""
+    return _FRONT_MATTER.sub("", markdown, count=1)
 
 
 def write_front_matter(root: Path, papers: Iterable[Paper]) -> list[Path]:

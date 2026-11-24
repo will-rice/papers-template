@@ -14,8 +14,7 @@ from papers_pipeline.models import SourceRecord
 
 class _CursorState(TypedDict):
     date: str | None
-    page: int
-    source_consumed: int
+    stopped_at: int | None
 
 
 class HuggingFaceAdapter:
@@ -39,63 +38,69 @@ class HuggingFaceAdapter:
             if state["date"] is not None
             else (window.end - timedelta(days=1)).date()
         )
-        text = await client.get_text(
-            "https://huggingface.co/api/daily_papers",
-            {
-                "date": current_date.isoformat(),
-                "p": str(state["page"]),
-                "limit": str(config.page_size),
-            },
-            {},
-        )
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as error:
-            raise InfrastructureError(
-                f"invalid JSON from huggingface: {error}"
-            ) from error
-        if not isinstance(payload, list):
-            raise InfrastructureError(
-                "invalid JSON from huggingface: expected list payload"
+        # A day is ranked by live upvotes, so a position in it means nothing to a
+        # later run. Each call reads one day whole under a single limit, and a
+        # cursor only ever names a day; repeated papers merge in deduplicate.
+        items: list[object] = []
+        page_number = 0
+        day_read = False
+        # Every page adds an item or ends the day, so the budget bounds this loop.
+        while len(items) < config.max_results:
+            text = await client.get_text(
+                "https://huggingface.co/api/daily_papers",
+                {
+                    "date": current_date.isoformat(),
+                    "p": str(page_number),
+                    "limit": str(config.page_size),
+                },
+                {},
             )
-
-        parsed_records, errors = collect_records(payload, self._record)
-        records = tuple(
-            record
-            for record in parsed_records
-            if window.start <= record.published <= window.end
-        )
-        if not payload:
-            previous_date = current_date - timedelta(days=1)
-            next_cursor = (
-                _encode_cursor(
-                    {
-                        "date": previous_date.isoformat(),
-                        "page": 0,
-                        "source_consumed": state["source_consumed"],
-                    }
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as error:
+                raise InfrastructureError(
+                    f"invalid JSON from huggingface: {error}"
+                ) from error
+            if not isinstance(payload, list):
+                raise InfrastructureError(
+                    "invalid JSON from huggingface: expected list payload"
                 )
-                if previous_date >= window.start.date()
-                else None
-            )
-            return FetchPage(
-                records=records,
-                next_cursor=next_cursor,
-                capped=False,
-                permanent_errors=errors,
+            if not payload:
+                day_read = True
+                break
+            items.extend(payload)
+            page_number += 1
+
+        records, errors = collect_records(items[: config.max_results], self._record)
+        if not day_read:
+            if state["stopped_at"] is None or config.max_results > state["stopped_at"]:
+                return FetchPage(
+                    records=records,
+                    next_cursor=_encode_cursor(
+                        {
+                            "date": current_date.isoformat(),
+                            "stopped_at": config.max_results,
+                        }
+                    ),
+                    capped=True,
+                    permanent_errors=errors,
+                )
+            # A larger budget was not available, so retrying cannot finish this day.
+            errors = (
+                *errors,
+                f"huggingface day {current_date.isoformat()} reached the budget of "
+                f"{config.max_results} papers; any papers past it were not fetched",
             )
 
-        next_state: _CursorState = {
-            "date": current_date.isoformat(),
-            "page": state["page"] + 1,
-            "source_consumed": state["source_consumed"] + len(payload),
-        }
-        next_cursor = _encode_cursor(next_state)
-        capped = len(payload) >= config.max_results
+        previous_date = current_date - timedelta(days=1)
         return FetchPage(
             records=records,
-            next_cursor=next_cursor,
-            capped=capped,
+            next_cursor=(
+                _encode_cursor({"date": previous_date.isoformat(), "stopped_at": None})
+                if previous_date >= window.start.date()
+                else None
+            ),
+            capped=False,
             permanent_errors=errors,
         )
 
@@ -134,7 +139,7 @@ def _encode_cursor(state: Mapping[str, object]) -> str:
 
 def _decode_cursor(cursor: str | None) -> _CursorState:
     if cursor is None:
-        return {"date": None, "page": 0, "source_consumed": 0}
+        return {"date": None, "stopped_at": None}
     padding = "=" * (-len(cursor) % 4)
     try:
         decoded = base64.urlsafe_b64decode(f"{cursor}{padding}".encode("ascii"))
@@ -145,15 +150,10 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
         ) from error
     if not isinstance(data, dict):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
-    consumed = data.get("source_consumed", data.get("consumed", data.get("emitted")))
-    page = data.get("page")
+    # Older cursors also hold a page or item offset; every resume rereads the day.
     raw_date = data.get("date")
-    if (
-        not isinstance(consumed, int)
-        or consumed < 0
-        or not isinstance(page, int)
-        or page < 0
-    ):
+    stopped_at = data.get("stopped_at")
+    if stopped_at is not None and (not isinstance(stopped_at, int) or stopped_at < 1):
         raise InfrastructureError(f"invalid huggingface continuation cursor: {cursor}")
     if raw_date is not None:
         if not isinstance(raw_date, str):
@@ -166,7 +166,7 @@ def _decode_cursor(cursor: str | None) -> _CursorState:
             raise InfrastructureError(
                 f"invalid huggingface continuation cursor: {cursor}"
             ) from error
-    return {"date": raw_date, "page": page, "source_consumed": consumed}
+    return {"date": raw_date, "stopped_at": stopped_at}
 
 
 def _required_identifier(paper: dict[str, object]) -> str:

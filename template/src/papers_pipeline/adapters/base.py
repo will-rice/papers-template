@@ -59,6 +59,20 @@ class Adapter(Protocol):
         raise NotImplementedError
 
 
+@runtime_checkable
+class ForwardAdapter(Adapter, Protocol):
+    """An adapter whose recurring walk finds more than its history walk."""
+
+    async def fetch_forward(
+        self,
+        window: FetchWindow,
+        cursor: str | None,
+        client: RequestClient,
+        config: AdapterConfig,
+    ) -> FetchPage:
+        raise NotImplementedError
+
+
 def collect_records(
     items: Iterable[RawRecord],
     parser: Callable[[RawRecord], SourceRecord],

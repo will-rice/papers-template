@@ -79,7 +79,14 @@ class GitRepository:
         )
         if rebased.returncode != 0:
             # Later batches must not be committed in the middle of a rebase.
-            subprocess.run(["git", "rebase", "--abort"], cwd=self.root, check=True)
+            in_progress = subprocess.run(
+                ["git", "rev-parse", "--quiet", "--verify", "REBASE_HEAD"],
+                cwd=self.root,
+                stdout=subprocess.DEVNULL,
+                check=False,
+            )
+            if in_progress.returncode == 0:
+                subprocess.run(["git", "rebase", "--abort"], cwd=self.root, check=True)
             return False
         pushed = subprocess.run(
             ["git", "push", "--quiet", PUBLISH_REMOTE, f"HEAD:{PUBLISH_BRANCH}"],

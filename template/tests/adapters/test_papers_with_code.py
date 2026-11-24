@@ -135,7 +135,7 @@ async def test_papers_with_code_local_truncation_on_final_page_resumes_without_s
         "fixture-paper-local-2",
     )
     assert second_page.next_cursor is None
-    assert second_page.capped is True
+    assert second_page.capped is False
 
 
 @pytest.mark.asyncio

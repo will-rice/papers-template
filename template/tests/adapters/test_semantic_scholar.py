@@ -65,7 +65,7 @@ async def test_semantic_scholar_uses_declared_api_key_and_opaque_continuation(
 
 
 @pytest.mark.asyncio
-async def test_semantic_scholar_max_pages_sets_capped_without_dropping_cursor(
+async def test_semantic_scholar_leaves_the_page_budget_to_the_fetch_loop(
     semantic_scholar_client: RequestClient,
     semantic_scholar_config: AdapterConfig,
 ) -> None:
@@ -93,7 +93,7 @@ async def test_semantic_scholar_max_pages_sets_capped_without_dropping_cursor(
     )
 
     assert second_page.next_cursor
-    assert second_page.capped is True
+    assert second_page.capped is False
 
 
 @pytest.mark.asyncio
@@ -319,7 +319,7 @@ async def test_semantic_scholar_reports_windows_beyond_reachable_results(
             "https://api.semanticscholar.org/graph/v1/paper/search",
             params={
                 "query": "speech recognition",
-                "publicationDateOrYear": "2024-01-01:2024-01-08",
+                "publicationDateOrYear": "2024-01-01:2024-01-01",
                 "offset": "0",
                 "limit": "1",
                 "fields": (
@@ -341,7 +341,7 @@ async def test_semantic_scholar_reports_windows_beyond_reachable_results(
         page = await SemanticScholarAdapter(api_key="secret").fetch(
             window=FetchWindow(
                 start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-                end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 1, 23, tzinfo=timezone.utc),
             ),
             cursor=None,
             client=client,
@@ -349,6 +349,6 @@ async def test_semantic_scholar_reports_windows_beyond_reachable_results(
         )
 
     assert page.permanent_errors[-1] == (
-        "semantic_scholar window 2024-01-01..2024-01-08 matches 5000 papers; "
-        "only the first 1000 are reachable, so shorten the window"
+        "semantic_scholar window 2024-01-01..2024-01-01 matches 5000 papers; "
+        "only the first 1000 are reachable, so the rest of that day is skipped"
     )

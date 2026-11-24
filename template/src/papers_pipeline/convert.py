@@ -3,8 +3,10 @@ import base64
 import binascii
 import hashlib
 import locale
+import os
 import re
 import shutil
+import signal
 import subprocess
 from io import BytesIO
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -20,8 +22,13 @@ from PIL import Image
 
 from papers_pipeline.batching import Batch, expected_figures, expected_markdown
 from papers_pipeline.config import ConcurrencyConfig
-from papers_pipeline.errors import InfrastructureError, PaperError, RateLimitedError
-from papers_pipeline.front_matter import with_front_matter
+from papers_pipeline.errors import (
+    ConverterCrashError,
+    InfrastructureError,
+    PaperError,
+    RateLimitedError,
+)
+from papers_pipeline.front_matter import with_front_matter, without_front_matter
 from papers_pipeline.models import FailureAttempt, Paper, PipelineState
 from papers_pipeline.remote import RemoteDownloader
 
@@ -35,6 +42,13 @@ _PROCESS_SHUTDOWN_TIMEOUT = 2.0
 CONVERSION_MEMORY_LIMIT_BYTES = 8 * 1024**3
 MEMORY_SAMPLE_SECONDS = 1.0
 _DOCLING_TOOL = "docling"
+# docling's default PDF parser writes U+FFFD for glyphs it cannot map, even
+# where pdfium reads them, so garbled output is converted again with pdfium.
+_PDFIUM_BACKEND_ARGS = ("--pdf-backend", "pypdfium2")
+# Share of U+FFFD at which a paper counts as garbled. Of 29 affected files in
+# nine corpora, one lost its prose (2.8%); the rest peak at 0.39%, mostly math
+# symbols. pdfium splits words on some PDFs, so those keep docling's default.
+GARBLED_CHARACTER_SHARE = 0.01
 _PANDOC_TOOL = "pandoc"
 # arXiv renders most papers to HTML with LaTeXML. Converting that article with
 # pandoc takes under a second, while docling spends the better part of a minute
@@ -85,6 +99,30 @@ _DOCUMENT_FAILURE_PATTERNS = (
     ),
     re.compile(r"\bnot\s+a\s+(?:valid\s+)?pdf\b", re.IGNORECASE),
 )
+# POSIX shell exits for a command that cannot run or does not exist.
+_TOOL_UNAVAILABLE_EXITS = {126, 127}
+# Crash output is saved in the state file and fixme markers.
+_CRASH_OUTPUT_CHARS = 2000
+# Known-good inputs that show whether a converter still works after a crash.
+_PROBE_PDF = Path(__file__).with_name("conversion_probe.pdf")
+_PROBE_HTML = "<p>Conversion probe</p>"
+# Lines that carry no paper text: headings, and the note LaTeXML leaves for a
+# paper that only includes a PDF ("See pages 1-last of [x.pdf](https://x.pdf)").
+_NON_BODY_LINE = re.compile(
+    r"^(?:#{1,6}(?:[ \t].*)?|See pages [^\n]*? of \[[^\]\n]*\.pdf\]\([^)\n]*\))"
+    r"[ \t]*$",
+    re.MULTILINE,
+)
+# Markup that carries no paper text: docling's placeholders, such as
+# "<!-- image -->", and image links, whose alt text pandoc may wrap over lines.
+_NON_BODY_MARKUP = re.compile(r"<!--.*?-->|!\[[^\]]*\]\([^)\n]*\)", re.DOTALL)
+# One token: a run of letters untouched by U+FFFD, digits or underscores.
+_WORD_TOKEN = re.compile(r"(?<![\w\ufffd])[^\W\d_]+(?![\w\ufffd])")
+# Tokens this long are words a reader can use.
+_WHOLE_WORD_LETTERS = 4
+# Tokens this short are fragments. A backend that splits words ("m icrophone")
+# raises their share of the text, while its word count can still go up.
+_WORD_FRAGMENT_LETTERS = 2
 
 
 class CommandRunner:
@@ -99,6 +137,7 @@ class CommandRunner:
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as error:
             raise InfrastructureError(f"missing conversion tool: {argv[0]}") from error
@@ -148,8 +187,13 @@ class CommandRunner:
                 f" memory limit: {argv[0]}"
             )
 
-        stdout = _decode_output(await stdout_task)
-        stderr = _decode_output(await stderr_task)
+        stdout, stderr = await asyncio.shield(
+            _terminate_process(
+                process,
+                stdout_task=stdout_task,
+                stderr_task=stderr_task,
+            )
+        )
         assert process.returncode is not None
         completed = subprocess.CompletedProcess(
             args=list(argv),
@@ -173,8 +217,13 @@ class CommandRunner:
             )
             if _is_document_failure(completed.returncode, output):
                 raise PaperError(message) from process_error
-            raise InfrastructureError(
-                f"conversion infrastructure failure: {message}"
+            if completed.returncode in _TOOL_UNAVAILABLE_EXITS:
+                raise InfrastructureError(
+                    f"conversion infrastructure failure: {message}"
+                ) from process_error
+            raise ConverterCrashError(
+                f"converter crashed: {argv[0]} exited {completed.returncode}: "
+                f"{output[-_CRASH_OUTPUT_CHARS:]}"
             ) from process_error
         return completed
 
@@ -196,7 +245,8 @@ async def _wait_within_memory(
     try:
         while True:
             done, _ = await asyncio.wait({exited}, timeout=MEMORY_SAMPLE_SECONDS)
-            if done:
+            # process.wait() also waits for the pipes, which a descendant can hold.
+            if done or process.returncode is not None:
                 return False
             try:
                 root = psutil.Process(process.pid)
@@ -230,23 +280,30 @@ async def _terminate_process(
     stderr_task: asyncio.Task[bytes],
 ) -> tuple[str, str]:
     if process.returncode is None:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-
+        _signal_group(process, signal.SIGTERM)
         try:
             await asyncio.wait_for(process.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
         except asyncio.TimeoutError:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            await process.wait()
+            pass
 
-    stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+    # The leader may be gone while descendants still hold the output pipes.
+    _signal_group(process, signal.SIGKILL)
+    streams = (stdout_task, stderr_task)
+    _, unfinished = await asyncio.wait(streams, timeout=_PROCESS_SHUTDOWN_TIMEOUT)
+    for task in unfinished:
+        task.cancel()
+    await asyncio.gather(*unfinished, return_exceptions=True)
+    stdout, stderr = (b"" if task in unfinished else task.result() for task in streams)
     return _decode_output(stdout), _decode_output(stderr)
+
+
+def _signal_group(process: asyncio.subprocess.Process, signum: signal.Signals) -> None:
+    """Signal the converter's process group, which its session leader created."""
+    try:
+        os.killpg(process.pid, signum)
+    # macOS reports EPERM for a group whose only members are zombies.
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _decode_output(data: bytes) -> str:
@@ -307,7 +364,10 @@ class DownloadingMaterializer:
         return target
 
     async def download(self, url: str) -> bytes:
-        host = urlsplit(url).hostname or ""
+        try:
+            host = urlsplit(url).hostname or ""
+        except ValueError as error:
+            raise PaperError(f"invalid conversion input URL: {url}") from error
         interval = self._min_interval_seconds.get(host, 0.0)
         attempts = self._rate_limit_attempts.get(host, 1)
         async with self._host_locks.setdefault(host, asyncio.Lock()):
@@ -366,8 +426,10 @@ class _PreparedConversion:
     paper: Paper
     staged_output: Path | None
     error: str | None
+    tool: str
     deferred: bool = False
     needs_pdf: bool = False
+    crashed: bool = False
 
 
 def command_for(paper: Paper, input_path: Path, output: Path) -> list[str]:
@@ -433,6 +495,7 @@ async def convert_batch(
         """
         assert paper.arxiv_id is not None
         for url in _ARXIV_HTML_URLS:
+            shutil.rmtree(staged_output.with_suffix(".figures"), ignore_errors=True)
             html_paper = paper.model_copy(
                 update={
                     "input_format": "html",
@@ -461,17 +524,27 @@ async def convert_batch(
                 ),
                 encoding="utf-8",
             )
-            async with semaphores["html"]:
-                await runner.run(
-                    [
-                        *command_for(html_paper, input_path, staged_output),
-                        f"--lua-filter={_ARXIV_LUA_FILTER}",
-                    ],
-                    timeout=timeout_seconds,
-                )
+            # A rendering pandoc cannot convert is no rendering: the PDF may
+            # still work. A crash is remembered so the converter gets probed.
+            try:
+                async with semaphores["html"]:
+                    await runner.run(
+                        [
+                            *command_for(html_paper, input_path, staged_output),
+                            f"--lua-filter={_ARXIV_LUA_FILTER}",
+                        ],
+                        timeout=timeout_seconds,
+                    )
+            except ConverterCrashError:
+                crashed_tools.setdefault(_PANDOC_TOOL, paper)
+                return False
+            except PaperError:
+                return False
             localize_inline_figures(
                 staged_output, staged_output.with_suffix(".figures")
             )
+            if not has_real_body(staged_output.read_text(encoding="utf-8")):
+                continue
             return True
         return False
 
@@ -488,9 +561,12 @@ async def convert_batch(
                 continue
             target = figures / f"figure-{len(local) + 1}.webp"
             try:
-                payload = await materializer.download(
-                    urljoin(page_url, source.group(1))
-                )
+                figure_url = urljoin(page_url, source.group(1))
+            except ValueError:
+                local[source.group(1)] = None
+                continue
+            try:
+                payload = await materializer.download(figure_url)
             except RateLimitedError:
                 raise
             except PaperError:
@@ -512,17 +588,26 @@ async def convert_batch(
         return _HTML_IMAGE.sub(replace, html)
 
     async def convert_one(paper: Paper) -> _PreparedConversion:
+        # arXiv papers try pandoc on arXiv's HTML before their own input.
+        tool = _PANDOC_TOOL
         try:
             staged_output = _staged_output_path(workspace, paper)
-            if paper.arxiv_id is not None and await convert_arxiv_html(
-                paper, staged_output
-            ):
-                return _PreparedConversion(
-                    paper=paper, staged_output=staged_output, error=None
-                )
+            if paper.arxiv_id is not None:
+                if await convert_arxiv_html(paper, staged_output):
+                    return _PreparedConversion(
+                        paper=paper, staged_output=staged_output, error=None, tool=tool
+                    )
+                # What a failed rendering left must not reach the next converter.
+                staged_output.unlink(missing_ok=True)
+                shutil.rmtree(staged_output.with_suffix(".figures"), ignore_errors=True)
+            tool = _DOCLING_TOOL if paper.input_format == "pdf" else _PANDOC_TOOL
             if paper.input_format == "pdf" and not allow_pdf:
                 return _PreparedConversion(
-                    paper=paper, staged_output=None, error=None, needs_pdf=True
+                    paper=paper,
+                    staged_output=None,
+                    error=None,
+                    tool=tool,
+                    needs_pdf=True,
                 )
             input_path = await materializer.materialize(paper, workspace)
             async with semaphores[paper.input_format]:
@@ -542,6 +627,27 @@ async def convert_batch(
                         raise InfrastructureError(
                             f"converter reported success without output: {paper.identifier}"
                         )
+                    first_text = produced_markdown.read_text(encoding="utf-8")
+                    if is_garbled(first_text):
+                        pdfium_dir = pdf_output_dir / "pdfium"
+                        pdfium_dir.mkdir()
+                        pdfium_markdown = pdfium_dir / produced_markdown.name
+                        # The first output stands if this attempt fails.
+                        try:
+                            await runner.run(
+                                [
+                                    *command_for(paper, input_path, pdfium_dir),
+                                    *_PDFIUM_BACKEND_ARGS,
+                                ],
+                                timeout=timeout_seconds,
+                            )
+                        except (ConverterCrashError, PaperError):
+                            pass
+                        else:
+                            if pdfium_markdown.exists() and is_cleaner_conversion(
+                                pdfium_markdown.read_text(encoding="utf-8"), first_text
+                            ):
+                                produced_markdown = pdfium_markdown
                     localize_pdf_figures(
                         produced_markdown, staged_output.with_suffix(".figures")
                     )
@@ -551,18 +657,84 @@ async def convert_batch(
                 raise InfrastructureError(
                     f"converter reported success without output: {paper.identifier}"
                 )
+            if not has_real_body(staged_output.read_text(encoding="utf-8")):
+                raise PaperError(f"conversion has no body text: {paper.identifier}")
             return _PreparedConversion(
-                paper=paper, staged_output=staged_output, error=None
+                paper=paper, staged_output=staged_output, error=None, tool=tool
+            )
+        except ConverterCrashError as error:
+            crashed_tools.setdefault(tool, paper)
+            return _PreparedConversion(
+                paper=paper,
+                staged_output=None,
+                error=str(error),
+                tool=tool,
+                crashed=True,
             )
         except RateLimitedError as error:
             return _PreparedConversion(
-                paper=paper, staged_output=None, error=str(error), deferred=True
+                paper=paper,
+                staged_output=None,
+                error=str(error),
+                tool=tool,
+                deferred=True,
             )
         except PaperError as error:
             return _PreparedConversion(
-                paper=paper, staged_output=None, error=str(error)
+                paper=paper, staged_output=None, error=str(error), tool=tool
             )
 
+    async def converter_works(tool: str, paper: Paper) -> bool:
+        """Run a converter on a known-good input after a crash.
+
+        Args:
+            tool: Converter that crashed.
+            paper: Crashed paper, whose metadata builds the command.
+
+        Returns:
+            True if the converter works; False if the time budget ran out
+            first, which shows nothing either way.
+
+        Raises:
+            InfrastructureError: The converter fails on the known-good input.
+        """
+        timeout = (
+            timeout_seconds
+            if stop_at is None
+            else min(timeout_seconds, stop_at - loop.time())
+        )
+        if timeout <= 0:
+            return False
+        probe = workspace / "probe" / tool
+        probe.mkdir(parents=True)
+        if tool == _DOCLING_TOOL:
+            input_format = "pdf"
+            input_path = _PROBE_PDF
+            output = probe
+            produced = probe / f"{_PROBE_PDF.stem}.md"
+        else:
+            input_format = "html"
+            input_path = probe / "probe.html"
+            input_path.write_text(_PROBE_HTML, encoding="utf-8")
+            output = produced = probe / "probe.md"
+        command = command_for(
+            paper.model_copy(update={"input_format": input_format}), input_path, output
+        )
+        try:
+            await runner.run(command, timeout=timeout)
+        except (ConverterCrashError, PaperError) as error:
+            if stop_at is not None and loop.time() >= stop_at:
+                return False
+            raise InfrastructureError(
+                f"{tool} failed on a known-good document: {error}"
+            ) from error
+        if not produced.exists():
+            raise InfrastructureError(
+                f"{tool} produced no output for a known-good document"
+            )
+        return True
+
+    crashed_tools: dict[str, Paper] = {}
     tasks = {asyncio.create_task(convert_one(paper)): paper for paper in batch.papers}
     results: list[_PreparedConversion] = []
     interrupted: list[Paper] = []
@@ -592,6 +764,16 @@ async def convert_batch(
                     raise InfrastructureError(
                         "unexpected converter task failure"
                     ) from error
+
+        # A success proves only its own converter: pandoc working says nothing
+        # about docling. Any other converter that crashed must pass a probe, so
+        # a broken install cannot strike papers, however many crashed.
+        proven = {r.tool for r in results if r.staged_output is not None}
+        for tool in sorted(crashed_tools.keys() - proven):
+            if not await converter_works(tool, crashed_tools[tool]):
+                tool_crashes = [r for r in results if r.crashed and r.tool == tool]
+                interrupted.extend(result.paper for result in tool_crashes)
+                results = [result for result in results if result not in tool_crashes]
 
         succeeded = _promote_successes(results, root)
         failures = {
@@ -695,6 +877,82 @@ _OUTDATED_CONVERSION = (
 )
 
 
+def has_real_body(markdown: str) -> bool:
+    """Whether converted markdown holds any text beyond headings and PDF stubs.
+
+    Length is deliberately not a criterion: short papers are legitimate.
+
+    Args:
+        markdown: Converted paper, with or without front matter.
+
+    Returns:
+        False for empty output, headings alone (such as a lone "## Abstract"),
+        image links or docling placeholders alone, or a LaTeXML article that
+        only wraps a PDF include.
+    """
+    return re.search(r"\w", _body_text(markdown)) is not None
+
+
+def _body_text(markdown: str) -> str:
+    """Return converted markdown without front matter, markup and headings."""
+    return _NON_BODY_LINE.sub(
+        "", _NON_BODY_MARKUP.sub("", without_front_matter(markdown))
+    )
+
+
+def is_cleaner_conversion(retry: str, first: str) -> bool:
+    """Whether a retry is the same paper with less damage than the first output.
+
+    Fewer U+FFFD alone proves nothing, since empty output has none. The retry
+    must also keep at least as many whole words, which rejects truncation, and
+    no larger a share of word fragments, which rejects split words. On stored
+    papers this keeps pdfium for arxiv-2603-25750 (recovered words) and rejects
+    it for arxiv-2010-01703v2 (split words).
+
+    Args:
+        retry: Markdown from the second conversion.
+        first: Markdown from the first conversion.
+
+    Returns:
+        True if the retry should replace the first output.
+    """
+    retry_body, first_body = _body_text(retry), _body_text(first)
+    retry_words, retry_fragments = _token_counts(retry_body)
+    first_words, first_fragments = _token_counts(first_body)
+    return (
+        has_real_body(retry)
+        and retry_body.count("\ufffd") < first_body.count("\ufffd")
+        # With no whole word in the first output there is no fragment share to
+        # compare against, so the retry cannot be shown to be cleaner.
+        and first_words > 0
+        and retry_words >= first_words
+        # Cross-multiplied shares, so neither word count is a divisor.
+        and retry_fragments * first_words <= first_fragments * retry_words
+    )
+
+
+def _token_counts(body: str) -> tuple[int, int]:
+    """Count whole words and word fragments from one tokenization."""
+    lengths = [len(token) for token in _WORD_TOKEN.findall(body)]
+    return (
+        sum(length >= _WHOLE_WORD_LETTERS for length in lengths),
+        sum(length <= _WORD_FRAGMENT_LETTERS for length in lengths),
+    )
+
+
+def is_garbled(markdown: str) -> bool:
+    """Whether converted markdown has lost a visible share of its characters.
+
+    Args:
+        markdown: Converted paper, with or without front matter.
+
+    Returns:
+        True if U+FFFD makes up at least GARBLED_CHARACTER_SHARE of the body.
+    """
+    body = without_front_matter(markdown)
+    return bool(body) and body.count("\ufffd") / len(body) >= GARBLED_CHARACTER_SHARE
+
+
 def requeue_outdated_conversions(root: Path, papers: Sequence[Paper]) -> list[Path]:
     """Delete outdated conversions so the next nightly run redoes them.
 
@@ -728,8 +986,16 @@ def write_figure(payload: bytes, path: Path) -> bool:
     try:
         image = Image.open(BytesIO(payload))
         image.load()
-    # UnidentifiedImageError and truncation are both OSErrors.
-    except (OSError, Image.DecompressionBombError):
+    # UnidentifiedImageError and truncation are both OSErrors. Corrupt headers
+    # raise the others: ValueError and SyntaxError from PNG, OverflowError from
+    # JPEG 2000.
+    except (
+        OSError,
+        ValueError,
+        SyntaxError,
+        OverflowError,
+        Image.DecompressionBombError,
+    ):
         return False
     with image:
         image.thumbnail((FIGURE_MAX_PIXELS, FIGURE_MAX_PIXELS))

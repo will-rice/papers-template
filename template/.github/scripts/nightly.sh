@@ -36,6 +36,9 @@ for ((attempt = 1; attempt <= PUSH_ATTEMPTS; attempt++)); do
       git rebase --quiet FETCH_HEAD &&
       git push origin HEAD:main
   } || push_status=$?
+  if git rev-parse --quiet --verify REBASE_HEAD >/dev/null; then
+    git rebase --abort
+  fi
   if ((push_status == 0 || attempt == PUSH_ATTEMPTS)); then
     break
   fi

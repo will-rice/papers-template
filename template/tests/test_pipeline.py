@@ -23,6 +23,7 @@ from papers_pipeline.errors import (
 from papers_pipeline.git import GitRepository
 from papers_pipeline.config import FetchConfig
 from papers_pipeline.http import RequestClient
+from papers_pipeline.inventory import read_inventory
 from papers_pipeline.models import SourceRecord
 from papers_pipeline.pipeline import Dependencies, PipelinePaths, run_nightly
 from papers_pipeline.state import load_state
@@ -118,7 +119,7 @@ class FakeRunner(CommandRunner):
             next(arg.split("=", 1)[1] for arg in argv if arg.startswith("--output="))
         )
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(f"# {identifier}\n", encoding="utf-8")
+        output.write_text(f"# {identifier}\n\nBody text.\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
@@ -322,6 +323,8 @@ async def test_state_save_failure_restores_batch_outputs_and_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = make_paths(tmp_path)
+    state_before = f"fetched_through:\n  arxiv: '{NOW.isoformat()}'\n".encode()
+    paths.state.write_bytes(state_before)
     git = RecordingGit()
 
     def fail_save(path: Path, _state: object) -> None:
@@ -340,7 +343,7 @@ async def test_state_save_failure_restores_batch_outputs_and_index(
             ),
         )
 
-    assert not paths.state.exists()
+    assert paths.state.read_bytes() == state_before
     assert (paths.root / "README.md").read_bytes() == INITIAL_README
     assert list((paths.root / "papers").glob("*")) == []
     assert git.messages == ["chore: update paper inventory"]
@@ -587,6 +590,47 @@ async def test_no_changes_produce_no_inventory_or_batch_commit(tmp_path: Path) -
     assert second_git.messages == []
     assert summary.generated == 1
     assert summary.pending == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_source", "stored", "reported"),
+    [
+        ("semantic_scholar", "2603.04304", "2603.04304v1"),
+        ("arxiv", "2603.04304v9", "2603.04304v10"),
+    ],
+)
+async def test_paper_reported_under_another_version_is_not_reconverted(
+    tmp_path: Path, stored_source: str, stored: str, reported: str
+) -> None:
+    paths = make_paths(tmp_path)
+    paper = record("versioned")
+    await run_nightly(
+        paths,
+        dependencies(
+            FakeAdapter(
+                [paper.model_copy(update={"source": stored_source, "arxiv_id": stored})]
+            ),
+            FakeRunner(),
+            RecordingGit(),
+        ),
+    )
+    markdown = sorted((tmp_path / "papers").glob("*.md"))
+
+    summary = await run_nightly(
+        paths,
+        dependencies(
+            FakeAdapter([paper.model_copy(update={"arxiv_id": reported})]),
+            FakeRunner(),
+            RecordingGit(),
+        ),
+    )
+
+    assert [row.identifier for row in read_inventory(paths.inventory)] == [
+        f"arxiv:{stored}"
+    ]
+    assert summary.attempted == 0
+    assert sorted((tmp_path / "papers").glob("*.md")) == markdown
 
 
 @pytest.mark.asyncio

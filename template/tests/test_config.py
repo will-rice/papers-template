@@ -284,3 +284,39 @@ def test_validate_command_reports_invalid_config_without_traceback(
     assert captured.out == ""
     assert captured.err == f"error: fix {valid_config}: concurrency.pdf must equal 1\n"
     assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize("field", ["include_any", "include_all", "exclude_any"])
+@pytest.mark.parametrize("term", ["vocal*ize", "*", " "])
+def test_validate_config_only_rejects_invalid_topic_term(
+    valid_config: Path, capsys: pytest.CaptureFixture[str], field: str, term: str
+) -> None:
+    data = _load_yaml(valid_config)
+    topic = data["topic"]
+    assert isinstance(topic, dict)
+    topic[field] = [term]
+    _write_yaml(valid_config, data)
+
+    exit_code = app(["validate", "--config", str(valid_config), "--config-only"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.err == (
+        f"error: fix {valid_config}: invalid topic term: {term!r}\n"
+    )
+
+
+def test_validate_config_only_ignores_terms_when_a_plugin_decides(
+    valid_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = _load_yaml(valid_config)
+    topic = data["topic"]
+    assert isinstance(topic, dict)
+    topic["include_any"] = ["vocal*ize"]
+    topic["plugin"] = "topic_plugin:accept_topic"
+    _write_yaml(valid_config, data)
+
+    exit_code = app(["validate", "--config", str(valid_config), "--config-only"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == f"valid: {valid_config}\n"

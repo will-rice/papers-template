@@ -1,10 +1,15 @@
 """Cross-source fetch orchestration with shared deadlines and continuation state."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 
-from papers_pipeline.adapters.base import Adapter, FetchPage, FetchWindow
+from papers_pipeline.adapters.base import (
+    Adapter,
+    FetchPage,
+    FetchWindow,
+    ForwardAdapter,
+)
 from papers_pipeline.config import AdapterConfig, PipelineConfig
 from papers_pipeline.errors import InfrastructureError, SourceUnavailableError
 from papers_pipeline.http import Deadline, RequestClient
@@ -49,12 +54,25 @@ class _WindowFetch:
     rejected: int
     error_events: list[str]
     pages: int
+    unavailable: SourceUnavailableError | None
+
+
+@dataclass(frozen=True)
+class _ForwardFetch:
+    records: list[SourceRecord]
+    continuation: SourceContinuation | None
+    covered_through: datetime | None
+    capped: bool
+    complete: bool
+    rejected: int
+    error_events: list[str]
+    unavailable: SourceUnavailableError | None
 
 
 @dataclass(frozen=True)
 class _BackfillFetch:
     records: list[SourceRecord]
-    progress: BackfillProgress
+    progress: BackfillProgress | None
     capped: bool
     rejected: int
     events: list[str]
@@ -96,6 +114,7 @@ async def fetch_all(
     events: list[str] = []
     continuations = dict(state.continuations)
     backfill = dict(state.backfill)
+    fetched_through = dict(state.fetched_through)
 
     for adapter_index, adapter_config in enumerate(config.adapters):
         if not adapter_config.enabled:
@@ -103,29 +122,39 @@ async def fetch_all(
 
         adapter = adapters[adapter_config.name]
         continuation = continuations.get(adapter.name)
-        window = FetchWindow(
-            start=(
-                continuation.window_start
-                if continuation
-                else now - timedelta(days=adapter_config.lookback_days)
-            ),
-            end=continuation.window_end if continuation else now,
-        )
+        recorded = fetched_through.get(adapter.name)
+        lookback_start = now - timedelta(days=adapter_config.lookback_days)
         starting_cursor = continuation.cursor if continuation else None
+        if continuation is None:
+            start = (
+                lookback_start if recorded is None else min(lookback_start, recorded)
+            )
+            window = FetchWindow(start=start, end=now)
+            walk_end = now
+        elif starting_cursor is None:
+            window = FetchWindow(start=continuation.window_start, end=now)
+            walk_end = now
+        else:
+            window = FetchWindow(
+                start=continuation.window_start, end=continuation.window_end
+            )
+            # A split span ends on a day's last instant; the walk goes on past it.
+            walk_end = now if window.end.time() == time.max else window.end
 
-        try:
-            async with client_factory(deadline) as client:
-                forward = await _fetch_window(
-                    adapter,
-                    config,
-                    adapter_index,
-                    window,
-                    starting_cursor,
-                    client,
-                    max_pages=adapter_config.max_pages,
-                    max_results=adapter_config.max_results,
-                )
-                history = await _backfill(
+        async with client_factory(deadline) as client:
+            forward = await _fetch_forward(
+                adapter,
+                config,
+                adapter_index,
+                window,
+                walk_end,
+                continuation,
+                recorded,
+                now,
+                client,
+            )
+            history = (
+                await _backfill(
                     adapter,
                     config,
                     adapter_index,
@@ -133,45 +162,55 @@ async def fetch_all(
                     window.start,
                     client,
                 )
-                events.extend(_prefix_events(adapter.name, client.events))
-        except SourceUnavailableError as error:
-            # One source's outage should not stop the others or conversion;
-            # its cursor and backfill progress stay put for the next run.
-            events.append(f"{adapter.name}: source unavailable this run: {error}")
-            stats.append(
-                FetchStats(
-                    source=adapter.name,
-                    fetched=0,
-                    rejected=0,
-                    capped=False,
-                    complete=False,
-                )
+                if forward.unavailable is None
+                else None
             )
-            continue
+            events.extend(_prefix_events(adapter.name, client.events))
+        if forward.unavailable is not None:
+            # One source's outage should not stop the others or conversion;
+            # the pages it already returned are kept and it resumes next run.
+            events.append(
+                f"{adapter.name}: source unavailable this run: {forward.unavailable}"
+            )
         events.extend(forward.error_events)
 
-        if forward.cursor is not None:
-            continuations[adapter.name] = SourceContinuation(
-                cursor=forward.cursor,
-                window_start=window.start,
-                window_end=window.end,
-            )
+        if forward.continuation is not None:
+            continuations[adapter.name] = forward.continuation
             if forward.capped:
-                events.append(f"{adapter.name}: cap reached; continuation persisted")
-        elif forward.complete:
+                events.append(
+                    f"{adapter.name}: cap reached; continuation persisted"
+                    if forward.continuation.cursor is not None
+                    else f"{adapter.name}: cap reached"
+                )
+        else:
             continuations.pop(adapter.name, None)
-            if starting_cursor is not None:
-                events.append(f"{adapter.name}: fetch complete; cursor cleared")
-            else:
-                events.append(f"{adapter.name}: fetch complete")
-        elif forward.capped:
-            continuations.pop(adapter.name, None)
-            events.append(f"{adapter.name}: cap reached")
+            if forward.complete:
+                if starting_cursor is not None:
+                    events.append(f"{adapter.name}: fetch complete; cursor cleared")
+                else:
+                    events.append(f"{adapter.name}: fetch complete")
+            elif forward.capped:
+                events.append(f"{adapter.name}: cap reached")
+        # An ordinary night leaves a value inside the lookback alone: it is still
+        # a true lower bound and the next window is the same without a state commit.
+        ordinary = (
+            continuation is None
+            and forward.continuation is None
+            and recorded is not None
+            and recorded >= lookback_start
+        )
+        if forward.covered_through is not None and not ordinary:
+            fetched_through[adapter.name] = (
+                forward.covered_through
+                if recorded is None
+                else max(recorded, forward.covered_through)
+            )
 
         source_records = forward.records
         rejected = forward.rejected
         if history is not None:
-            backfill[adapter.name] = history.progress
+            if history.progress is not None:
+                backfill[adapter.name] = history.progress
             events.extend(history.events)
             source_records = [*source_records, *history.records]
             rejected += history.rejected
@@ -190,10 +229,142 @@ async def fetch_all(
     return FetchResult(
         records=tuple(records),
         state=state.model_copy(
-            update={"continuations": continuations, "backfill": backfill}
+            update={
+                "continuations": continuations,
+                "backfill": backfill,
+                "fetched_through": fetched_through,
+            }
         ),
         stats=tuple(stats),
         events=tuple(events),
+    )
+
+
+async def _fetch_forward(
+    adapter: Adapter,
+    config: PipelineConfig,
+    adapter_index: int,
+    window: FetchWindow,
+    walk_end: datetime,
+    resumed: SourceContinuation | None,
+    recorded: datetime | None,
+    now: datetime,
+    client: RequestClient,
+) -> _ForwardFetch:
+    """Walk from window.start to walk_end oldest first, halving dense spans.
+
+    Everything before the frontier (the later of recorded and the last finished
+    span) has been fetched. A walk stopped short resumes at that frontier, so
+    new days are never queued behind a repeat of the lookback overlap. Halving
+    spends no page budget, so a run always reaches a span it can fetch.
+    """
+    adapter_config = config.adapters[adapter_index]
+    records: list[SourceRecord] = []
+    error_events: list[str] = []
+    rejected = 0
+    pages_left = adapter_config.max_pages
+    results_left = adapter_config.max_results
+    span = window
+    cursor = resumed.cursor if resumed else None
+    covered_through: datetime | None = None
+    truncated = False
+    unavailable: SourceUnavailableError | None = None
+    finished = False
+    fetch_page = (
+        adapter.fetch_forward if isinstance(adapter, ForwardAdapter) else adapter.fetch
+    )
+    while True:
+        chunk = await _fetch_window(
+            adapter,
+            fetch_page,
+            config,
+            adapter_index,
+            span,
+            cursor,
+            client,
+            max_pages=pages_left,
+            max_results=results_left,
+        )
+        records.extend(chunk.records)
+        rejected += chunk.rejected
+        error_events.extend(chunk.error_events)
+        unavailable = chunk.unavailable
+        if chunk.cursor is not None:
+            truncated = truncated or chunk.capped
+            break
+        if unavailable is not None:
+            break
+        cursor = None
+        halves = _split_window(span) if chunk.capped else None
+        if halves is not None:
+            span = halves[0]
+            continue
+        # A capped single day cannot be narrowed; the adapter reported it.
+        truncated = truncated or chunk.capped
+        pages_left -= chunk.pages
+        results_left -= len(chunk.records)
+        # A split span ends on a day's last instant; the next starts at midnight.
+        covered_through = (
+            span.end + timedelta(microseconds=1)
+            if span.end.time() == time.max
+            else span.end
+        )
+        if span.end >= walk_end:
+            finished = True
+            break
+        if pages_left <= 0 or results_left <= 0:
+            truncated = True
+            break
+        span = FetchWindow(start=covered_through, end=walk_end)
+
+    frontier = max(
+        (value for value in (recorded, covered_through) if value is not None),
+        default=None,
+    )
+    continuation: SourceContinuation | None
+    if finished:
+        continuation = None
+    elif chunk.cursor is not None and (frontier is None or span.start >= frontier):
+        continuation = SourceContinuation(
+            cursor=chunk.cursor, window_start=span.start, window_end=span.end
+        )
+    elif frontier is None or (unavailable is not None and covered_through is None):
+        # An outage before any progress leaves the saved position as it was.
+        continuation = resumed
+    else:
+        # Stopped inside the overlap or between spans: new days come next.
+        continuation = SourceContinuation(
+            cursor=None, window_start=frontier, window_end=now
+        )
+    return _ForwardFetch(
+        records=records,
+        continuation=continuation,
+        covered_through=covered_through,
+        capped=truncated,
+        complete=finished and not truncated,
+        rejected=rejected,
+        error_events=error_events,
+        unavailable=unavailable,
+    )
+
+
+def _split_window(window: FetchWindow) -> tuple[FetchWindow, FetchWindow] | None:
+    """Halve a window on a UTC day boundary; a single day cannot be split."""
+    days = (window.end.date() - window.start.date()).days
+    if days == 0:
+        return None
+    last_left_day = window.start.date() + timedelta(days=(days - 1) // 2)
+    return (
+        FetchWindow(
+            start=window.start,
+            end=datetime.combine(last_left_day, time.max, tzinfo=UTC),
+        ),
+        FetchWindow(
+            start=datetime.combine(
+                last_left_day + timedelta(days=1), time.min, tzinfo=UTC
+            ),
+            end=window.end,
+        ),
     )
 
 
@@ -224,7 +395,12 @@ def _backfill_plan(
             start=max(
                 limit, covered_from - timedelta(days=adapter_config.backfill_days)
             ),
-            end=covered_from,
+            # A boundary at midnight means that whole day is already covered.
+            end=(
+                covered_from - timedelta(microseconds=1)
+                if covered_from.time() == time.min
+                else covered_from
+            ),
         ),
         cursor=None,
         covered_from=covered_from,
@@ -254,10 +430,13 @@ async def _backfill(
     pages_left = adapter_config.max_pages
     results_left = adapter_config.max_results
     covered_from = plan.covered_from
+    starting_covered_from = covered_from
     continuation: SourceContinuation | None = None
+    unavailable: SourceUnavailableError | None = None
     while plan is not None and pages_left > 0 and results_left > 0:
         chunk = await _fetch_window(
             adapter,
+            adapter.fetch,
             config,
             adapter_index,
             plan.window,
@@ -266,11 +445,10 @@ async def _backfill(
             max_pages=pages_left,
             max_results=results_left,
         )
-        pages_left -= chunk.pages
-        results_left -= len(chunk.records)
         records.extend(chunk.records)
         rejected += chunk.rejected
         error_events.extend(chunk.error_events)
+        unavailable = chunk.unavailable
         if chunk.cursor is not None:
             continuation = SourceContinuation(
                 cursor=chunk.cursor,
@@ -278,15 +456,27 @@ async def _backfill(
                 window_end=plan.window.end,
             )
             break
-        # A complete chunk, or one capped without a cursor, moves the boundary
-        # back; the latter cannot be resumed.
+        if unavailable is not None:
+            break
+        halves = _split_window(plan.window) if chunk.capped else None
+        if halves is not None:
+            # Keep the newer half so the covered boundary stays contiguous.
+            plan = _BackfillPlan(
+                window=halves[1], cursor=None, covered_from=plan.covered_from
+            )
+            continue
+        pages_left -= chunk.pages
+        results_left -= len(chunk.records)
+        # A complete chunk, or a capped single day, moves the boundary back.
         covered_from = plan.window.start
         plan = _backfill_plan(
             adapter_config, BackfillProgress(covered_from=covered_from), forward_start
         )
 
     covered = covered_from.date().isoformat()
-    if continuation is not None:
+    if unavailable is not None:
+        summary = f"{adapter.name}: backfill unavailable this run: {unavailable}"
+    elif continuation is not None:
         summary = (
             f"{adapter.name}: backfill cap reached at {covered}; continuation persisted"
         )
@@ -296,8 +486,12 @@ async def _backfill(
         summary = f"{adapter.name}: backfilled to {covered}"
     return _BackfillFetch(
         records=records,
-        progress=BackfillProgress(covered_from=covered_from, continuation=continuation),
-        capped=continuation is not None,
+        progress=(
+            BackfillProgress(covered_from=covered_from, continuation=continuation)
+            if continuation is not None or covered_from != starting_covered_from
+            else progress
+        ),
+        capped=continuation is not None and unavailable is None,
         rejected=rejected,
         events=[*error_events, summary],
     )
@@ -305,6 +499,9 @@ async def _backfill(
 
 async def _fetch_window(
     adapter: Adapter,
+    fetch_page: Callable[
+        [FetchWindow, str | None, RequestClient, AdapterConfig], Awaitable[FetchPage]
+    ],
     config: PipelineConfig,
     adapter_index: int,
     window: FetchWindow,
@@ -321,11 +518,17 @@ async def _fetch_window(
     capped = False
     complete = False
     pages_fetched = 0
+    unavailable: SourceUnavailableError | None = None
     while pages_fetched < max_pages:
         remaining = max_results - len(records)
-        page = await adapter.fetch(
-            window, cursor, client, _page_config(config, adapter_index, remaining)
-        )
+        try:
+            page = await fetch_page(
+                window, cursor, client, _page_config(config, adapter_index, remaining)
+            )
+        except SourceUnavailableError as error:
+            # Pages already returned stand; cursor still points at this page.
+            unavailable = error
+            break
         pages_fetched += 1
         error_events.extend(_page_error_events(adapter.name, page))
         rejected += len(page.permanent_errors)
@@ -353,4 +556,5 @@ async def _fetch_window(
         rejected=rejected,
         error_events=error_events,
         pages=pages_fetched,
+        unavailable=unavailable,
     )

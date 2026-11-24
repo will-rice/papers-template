@@ -102,6 +102,52 @@ def test_conversion_environment_comes_from_the_lock() -> None:
     assert (SCRIPTS / "setup-conversion.sh").stat().st_mode & stat.S_IXUSR
 
 
+@pytest.mark.parametrize(
+    ("failures", "exit_code", "downloads"),
+    [(0, 0, 1), (3, 0, 4), (99, 7, 4)],
+    ids=["first-try", "recovers", "gives-up"],
+)
+def test_conversion_setup_retries_the_model_download(
+    tmp_path: Path, failures: int, exit_code: int, downloads: int
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "downloads"
+    executables = {
+        "uv": (
+            'if [ "$2" = docling-tools ]; then\n'
+            f'  echo x >> "{calls}"\n'
+            f'  [ "$(wc -l < "{calls}")" -gt {failures} ] || exit 7\n'
+            "fi\n"
+            'if [ "$2" = python ]; then echo /bin/true; fi\n'
+        ),
+        "npm": "",
+        "sleep": "",
+    }
+    for name, body in executables.items():
+        path = bin_dir / name
+        path.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+        path.chmod(0o755)
+    environment = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "GITHUB_ENV": str(tmp_path / "github_env"),
+        "GITHUB_PATH": str(tmp_path / "github_path"),
+    }
+
+    result = subprocess.run(
+        ["bash", str((SCRIPTS / "setup-conversion.sh").resolve())],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == exit_code, result.stderr
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == downloads
+
+
 def test_ci_proves_the_nightly_conversion_environment() -> None:
     # The nightly and CI build the environment with the same script, and CI
     # then converts real fixtures with it.
@@ -248,6 +294,7 @@ def _nightly_scenario(
     *,
     dirty_path: str | None,
     concurrent_push: bool = False,
+    conflicting_push: bool = False,
     rejected_pushes: int = 0,
 ) -> tuple[int, int]:
     origin = tmp_path / "origin.git"
@@ -279,6 +326,19 @@ def _nightly_scenario(
     hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
 
     concurrent_command = ""
+    sleep_command = ""
+    if conflicting_push:
+        other = tmp_path / "other"
+        _git(tmp_path, "clone", "-q", "-b", "main", str(origin), str(other))
+        _git(other, "config", "user.name", "Other")
+        _git(other, "config", "user.email", "other@example.test")
+        concurrent_command = (
+            f'printf "conflict\\n" >> "{other}/papers.csv"\n'
+            f'git -C "{other}" commit -q -am "conflicting merge"\n'
+            f'git -C "{other}" push -q origin main\n'
+        )
+        # The conflicting commit is reverted upstream before the next attempt.
+        sleep_command = f'git -C "{other}" push -q --force origin HEAD~1:main\n'
     if concurrent_push:
         other = tmp_path / "other"
         _git(tmp_path, "clone", "-q", "-b", "main", str(origin), str(other))
@@ -316,7 +376,7 @@ def _nightly_scenario(
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
     # Retries wait between attempts; the test does not need to.
     sleep = fake_bin / "sleep"
-    sleep.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    sleep.write_text(f"#!/usr/bin/env bash\n{sleep_command}", encoding="utf-8")
     sleep.chmod(sleep.stat().st_mode | stat.S_IXUSR)
     script = SCRIPTS / "nightly.sh"
     git_executable = shutil.which("git")
@@ -380,6 +440,16 @@ def test_nightly_retries_a_rejected_push(
     )
     assert status != 0
     assert remote_count == expected_commits
+
+
+def test_nightly_aborts_a_failed_rebase_before_retrying(tmp_path: Path) -> None:
+    status, remote_count = _nightly_scenario(
+        tmp_path, dirty_path=None, conflicting_push=True
+    )
+
+    assert status != 0
+    assert remote_count == 2
+    assert not (tmp_path / "work" / ".git" / "REBASE_HEAD").exists()
 
 
 def test_nightly_script_publishes_every_batch_and_retries_the_final_push() -> None:

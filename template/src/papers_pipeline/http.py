@@ -11,7 +11,7 @@ import httpx
 from .config import FetchConfig
 from .errors import SourceUnavailableError
 
-_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _NON_RETRYABLE_REQUEST_ERROR_MESSAGE = "request failed"
 
 
@@ -64,7 +64,12 @@ class RequestClient:
         await self._client.aclose()
 
     async def get_text(
-        self, url: str, params: Mapping[str, str], headers: Mapping[str, str]
+        self,
+        url: str,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+        *,
+        is_incomplete: Callable[[str], bool] | None = None,
     ) -> str:
         for attempt in range(self.config.retries + 1):
             timeout = min(
@@ -96,7 +101,7 @@ class RequestClient:
                     raise SourceUnavailableError(
                         f"redirect HTTP {response.status_code}: {url}"
                     )
-                if response.status_code in _RETRYABLE_STATUS_CODES:
+                if response.status_code in RETRYABLE_STATUS_CODES:
                     if attempt == self.config.retries:
                         raise SourceUnavailableError(
                             f"request retries exhausted: {url}"
@@ -107,6 +112,14 @@ class RequestClient:
                 elif response.is_error:
                     raise SourceUnavailableError(
                         f"permanent HTTP {response.status_code}: {url}"
+                    )
+                elif is_incomplete is not None and is_incomplete(response.text):
+                    if attempt == self.config.retries:
+                        raise SourceUnavailableError(
+                            f"request retries exhausted: {url}"
+                        )
+                    self.events.append(
+                        f"retry {attempt + 1}: incomplete response for {url}"
                     )
                 else:
                     return str(response.text)

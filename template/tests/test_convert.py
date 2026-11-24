@@ -1,13 +1,19 @@
 import asyncio
 import base64
+import http.server
 import io
 import itertools
 import os
+import struct
 import subprocess
 import sys
+import threading
+import time
+import zlib
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urlsplit
 
 import pypandoc
@@ -29,16 +35,27 @@ from papers_pipeline.convert import (
     CommandRunner,
     DownloadingMaterializer,
     convert_batch,
+    has_real_body,
+    is_cleaner_conversion,
     localize_inline_figures,
     localize_pdf_figures,
     requeue_outdated_conversions,
     write_figure,
 )
 from papers_pipeline import convert
-from papers_pipeline.errors import InfrastructureError, PaperError, RateLimitedError
+from papers_pipeline.errors import (
+    ConverterCrashError,
+    InfrastructureError,
+    PaperError,
+    RateLimitedError,
+)
 from papers_pipeline.http import RequestClient
 from papers_pipeline.models import FailureAttempt, InputFormat, Paper, PipelineState
-from papers_pipeline.remote import HttpResponse, RemoteDownloader
+from papers_pipeline.remote import (
+    HttpResponse,
+    PinnedHttpConnector,
+    RemoteDownloader,
+)
 
 NOW = datetime(2026, 9, 23, 2, 0, tzinfo=timezone.utc)
 FIXTURES = Path(__file__).parent / "fixtures" / "conversion"
@@ -210,13 +227,24 @@ async def test_command_runner_timeout_terminates_child_and_preserves_output(
     tmp_path: Path,
 ) -> None:
     pid_file = tmp_path / "timeout.pid"
-    child = _sleeping_child_script(pid_file)
+    output_file = tmp_path / "timeout.ready"
+    child = _sleeping_child_script(pid_file, output_file)
+    task = asyncio.create_task(
+        CommandRunner().run([sys.executable, "-c", child], timeout=0.1)
+    )
+    # The task's first step spawns the child and has not yet armed the timeout.
+    # Blocking the event loop holds the timeout back until the child is ready.
+    await asyncio.sleep(0)
+    deadline = time.monotonic() + 60
+    while not output_file.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
 
     # One document outrunning the converter fails that paper, not the run.
     with pytest.raises(PaperError, match="conversion timed out after 0s:") as exc_info:
-        await CommandRunner().run([sys.executable, "-c", child], timeout=0.1)
+        await task
 
-    pid = int((await _wait_for_file(pid_file)).strip())
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
     await _assert_process_gone(pid)
     timeout_error = exc_info.value.__cause__
     assert isinstance(timeout_error, subprocess.TimeoutExpired)
@@ -270,6 +298,67 @@ async def test_command_runner_cancellation_terminates_child(
     await _assert_process_gone(pid)
 
 
+def _background_child_script(pid_file: Path, leader: str) -> str:
+    """Shell that leaves a TERM-ignoring child holding the pipes, then runs leader."""
+    return (
+        "trap '' TERM; sleep 30 & "
+        f"echo $! > {pid_file}.tmp; mv {pid_file}.tmp {pid_file}; {leader}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "memory_limit", "timeout", "expected"),
+    [
+        ("sleep 30", 1024**3, 1.0, "timed out"),
+        ("sleep 30", 1, 20.0, "memory limit"),
+    ],
+    ids=["timeout", "memory"],
+)
+async def test_command_runner_failure_kills_descendants_holding_pipes(
+    tmp_path: Path, leader: str, memory_limit: int, timeout: float, expected: str
+) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    argv = ["sh", "-c", _background_child_script(pid_file, leader)]
+
+    async with asyncio.timeout(15):
+        with pytest.raises(PaperError, match=expected):
+            await CommandRunner(memory_limit_bytes=memory_limit).run(argv, timeout)
+
+    await _assert_process_gone(int((await _wait_for_file(pid_file)).strip()))
+
+
+@pytest.mark.asyncio
+async def test_command_runner_cancellation_kills_descendants_holding_pipes(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    argv = ["sh", "-c", _background_child_script(pid_file, "sleep 30")]
+    task = asyncio.create_task(CommandRunner().run(argv, timeout=20))
+    pid = int((await _wait_for_file(pid_file)).strip())
+
+    task.cancel()
+    async with asyncio.timeout(15):
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    await _assert_process_gone(pid)
+
+
+@pytest.mark.asyncio
+async def test_command_runner_success_does_not_wait_for_background_descendant(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    argv = ["sh", "-c", _background_child_script(pid_file, "echo done")]
+
+    async with asyncio.timeout(15):
+        result = await CommandRunner().run(argv, timeout=25)
+
+    assert result.stdout == "done\n"
+    await _assert_process_gone(int((await _wait_for_file(pid_file)).strip()))
+
+
 @pytest.mark.asyncio
 async def test_command_runner_isolates_recognized_corrupt_document_failure() -> None:
     with pytest.raises(PaperError, match="corrupt input document") as exc_info:
@@ -297,7 +386,7 @@ async def test_command_runner_isolates_recognized_corrupt_document_failure() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("returncode", [-15, 137, 143])
-async def test_command_runner_maps_termination_exits_to_infrastructure_error(
+async def test_command_runner_reports_termination_exits_as_crashes(
     returncode: int,
 ) -> None:
     if returncode < 0:
@@ -305,7 +394,7 @@ async def test_command_runner_maps_termination_exits_to_infrastructure_error(
     else:
         script = f"raise SystemExit({returncode})"
 
-    with pytest.raises(InfrastructureError, match="conversion infrastructure failure"):
+    with pytest.raises(ConverterCrashError, match="converter crashed"):
         await CommandRunner().run([sys.executable, "-c", script], timeout=5)
 
 
@@ -320,18 +409,37 @@ async def test_command_runner_maps_termination_exits_to_infrastructure_error(
         ("cache directory is not writable", "stderr"),
         ("PyTorch shared library could not be loaded", "stderr"),
         ("libcudnn.so: cannot open shared object file", "stderr"),
-        ("unclassified converter failure", "stderr"),
     ],
 )
-async def test_command_runner_fails_safe_for_infrastructure_and_unknown_errors(
+async def test_command_runner_leaves_environment_messages_to_the_probe(
     message: str,
     stream: str,
 ) -> None:
     destination = "" if stream == "stdout" else ", file=sys.stderr"
     script = f"import sys; print({message!r}{destination}); raise SystemExit(1)"
 
-    with pytest.raises(InfrastructureError, match="conversion infrastructure failure"):
+    with pytest.raises(ConverterCrashError, match="converter crashed"):
         await CommandRunner().run([sys.executable, "-c", script], timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_command_runner_reports_unknown_exit_as_crash_with_bounded_output() -> (
+    None
+):
+    script = "import sys; print('#' * 5000 + 'end', file=sys.stderr); sys.exit(1)"
+
+    with pytest.raises(ConverterCrashError, match="end$") as exc_info:
+        await CommandRunner().run([sys.executable, "-c", script], timeout=5)
+    assert str(exc_info.value).count("#") == 1997
+
+
+@pytest.mark.asyncio
+async def test_command_runner_keeps_unrunnable_tool_exit_as_infrastructure() -> None:
+    with pytest.raises(InfrastructureError) as exc_info:
+        await CommandRunner().run(
+            [sys.executable, "-c", "raise SystemExit(127)"], timeout=5
+        )
+    assert not isinstance(exc_info.value, ConverterCrashError)
 
 
 @pytest.mark.asyncio
@@ -668,6 +776,84 @@ class FakeConnector:
         if self.error is not None:
             raise self.error
         return self.responses[min(len(self.calls), len(self.responses)) - 1]
+
+
+class _LoopbackConnector:
+    """Run the real HTTP connector against a local server, whatever was resolved."""
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+
+    async def get(
+        self,
+        *,
+        scheme: str,
+        address: str,
+        port: int,
+        target: str,
+        host_header: str,
+        tls_server_name: str | None,
+        timeout: float,
+    ) -> HttpResponse:
+        return await PinnedHttpConnector().get(
+            scheme="http",
+            address="127.0.0.1",
+            port=self.port,
+            target=target,
+            host_header=host_header,
+            tls_server_name=None,
+            timeout=timeout,
+        )
+
+
+class _NonAsciiUrlHandler(http.server.BaseHTTPRequestHandler):
+    requested: ClassVar[list[str]] = []
+
+    def do_GET(self) -> None:
+        self.requested.append(self.path)
+        if self.path == "/redirect":
+            self.send_response(302)
+            # A raw UTF-8 Location, which http.client decodes as Latin-1.
+            self.send_header("Location", "/caf%C3%A9/ü.pdf".encode().decode("latin-1"))
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", "4")
+        self.end_headers()
+        self.wfile.write(b"%PDF")
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Keep request logs out of the test output."""
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_percent_encodes_non_ascii_urls() -> None:
+    _NonAsciiUrlHandler.requested.clear()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NonAsciiUrlHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        downloader = RemoteDownloader(
+            resolver=FakeResolver(("93.184.216.34",)),
+            connector=_LoopbackConnector(server.server_address[1]),
+        )
+        direct = await downloader.download(
+            "https://public.example/caf%C3%A9/é.pdf?title=ñ&x=%20", 5
+        )
+        redirected = await downloader.download("https://public.example/redirect", 5)
+        with pytest.raises(PaperError, match="network failure"):
+            await downloader.download("https://例え.example/paper.pdf", 5)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert direct == redirected == b"%PDF"
+    assert _NonAsciiUrlHandler.requested == [
+        "/caf%C3%A9/%C3%A9.pdf?title=%C3%B1&x=%20",
+        "/redirect",
+        "/caf%C3%A9/%C3%BC.pdf",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1238,7 +1424,7 @@ async def test_docling_output_is_moved_from_its_output_directory(
     output = expected_markdown(tmp_path, target)
     assert result.succeeded[0].output == output
     assert output.read_text(encoding="utf-8") == with_front_matter(
-        target, "# converted .pdf\n"
+        target, "# converted .pdf\n\nBody text.\n"
     )
     assert not any((tmp_path / ".convert-batch").glob("**/*.md"))
 
@@ -1320,6 +1506,247 @@ async def test_unexpected_task_failure_is_wrapped_as_infrastructure_error(
         )
 
 
+_CRASH_CONVERTER = """
+import os, signal, sys, time
+from pathlib import Path
+
+broken, tool, *args = sys.argv[1:]
+if tool in broken.split(","):
+    raise SystemExit(1)
+source = args[1] if tool == "docling" else args[0]
+if "crash" in Path(source).name and "garbled" not in Path(source).name:
+    os.kill(os.getpid(), signal.SIGSEGV)
+if "slow" in Path(source).name:
+    time.sleep(60)
+if "badhtml" in Path(source).name and source.endswith(".html"):
+    os.kill(os.getpid(), signal.SIGSEGV)
+if "corrupthtml" in Path(source).name and source.endswith(".html"):
+    print("corrupt input document", file=sys.stderr)
+    raise SystemExit(1)
+if "oom" in Path(source).name:
+    print("CUDA out of memory", file=sys.stderr)
+    raise SystemExit(1)
+if tool == "docling":
+    output = Path(args[args.index("--output") + 1]) / f"{Path(source).stem}.md"
+else:
+    output = Path(next(a for a in args if a.startswith("--output=")).split("=", 1)[1])
+body = "## Abstract\\n" if "stubhtml" in Path(source).name and source.endswith(".html") else "# converted\\n\\nBody text.\\n"
+if "garbled" in Path(source).name and tool == "docling":
+    if "--pdf-backend" not in args:
+        body = "# converted\\n\\nBody \\ufffd\\ufffd text.\\n"
+    elif "crash" in Path(source).name:
+        os.kill(os.getpid(), signal.SIGSEGV)
+    elif "empty" in Path(source).name:
+        body = ""
+    elif "truncated" in Path(source).name:
+        body = "# converted\\n\\nBody\\n"
+output.write_text(body, encoding="utf-8")
+"""
+
+
+class CrashingConverterRunner(CommandRunner):
+    """Run each conversion as a real child process that can really crash."""
+
+    def __init__(self, script: Path, broken: Sequence[str] = ()) -> None:
+        super().__init__()
+        script.write_text(_CRASH_CONVERTER, encoding="utf-8")
+        self.prefix = [sys.executable, str(script), ",".join(broken)]
+
+    async def run(
+        self, argv: Sequence[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        return await super().run([*self.prefix, *argv], timeout)
+
+
+async def _convert_with_crashes(
+    root: Path,
+    papers: Sequence[Paper],
+    state: PipelineState | None = None,
+    broken: Sequence[str] = (),
+    time_budget_seconds: float | None = None,
+) -> convert.ConversionResult:
+    workspace = root / "work"
+    workspace.mkdir(exist_ok=True)
+    return await convert_batch(
+        Batch(papers=tuple(papers), estimated_cost=len(papers)),
+        workspace,
+        state or PipelineState(),
+        CONCURRENCY,
+        CrashingConverterRunner(root / "converter.py", broken),
+        FakeMaterializer(
+            fixtures={item.input_url: fixture_for(item) for item in papers}
+        ),
+        NOW,
+        time_budget_seconds=time_budget_seconds,
+    )
+
+
+@pytest.mark.asyncio
+async def test_crash_strikes_the_paper_and_keeps_its_successful_peer(
+    tmp_path: Path,
+) -> None:
+    crash = paper("doi:crash", input_format="html")
+    peer = paper("doi:peer", input_format="html")
+
+    result = await _convert_with_crashes(tmp_path, [crash, peer])
+
+    assert [item.paper for item in result.succeeded] == [peer]
+    assert [item.paper for item in result.failed] == [crash]
+    assert "converter crashed" in result.state.failures[crash.identifier][0].error
+    assert expected_markdown(tmp_path / "work", peer).exists()
+
+
+@pytest.mark.asyncio
+async def test_third_crash_writes_fixme_so_the_queue_moves_on(tmp_path: Path) -> None:
+    crash = paper("doi:crash", input_format="html")
+    peer = paper("doi:peer", input_format="html")
+    state = PipelineState(
+        failures={
+            crash.identifier: [
+                FailureAttempt(occurred_at=NOW.replace(day=day), error="crash")
+                for day in (21, 22)
+            ]
+        }
+    )
+
+    result = await _convert_with_crashes(tmp_path, [crash, peer], state)
+
+    marker = expected_markdown(tmp_path / "work", crash).with_suffix(".fixme.txt")
+    assert result.promoted == (marker,)
+    assert result.state.failures == {}
+    assert infer_backlog([crash, peer], tmp_path / "work").pending == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("poison", ["crash", "oom"])
+async def test_all_crash_batch_strikes_papers_when_the_probe_passes(
+    tmp_path: Path, poison: str
+) -> None:
+    papers = [
+        paper(f"doi:{poison}-1", input_format="html"),
+        paper(f"doi:{poison}-2", input_format="html"),
+    ]
+
+    result = await _convert_with_crashes(tmp_path, papers)
+
+    assert {item.paper for item in result.failed} == set(papers)
+    assert set(result.state.failures) == {item.identifier for item in papers}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("poison", ["crash", "oom"])
+async def test_all_crash_batch_aborts_without_strikes_when_the_probe_fails(
+    tmp_path: Path, poison: str
+) -> None:
+    papers = [
+        paper(f"doi:{poison}-1", input_format="html"),
+        paper(f"doi:{poison}-2", input_format="html"),
+    ]
+
+    with pytest.raises(InfrastructureError, match="known-good document"):
+        await _convert_with_crashes(tmp_path, papers, broken=["pandoc"])
+
+    assert infer_backlog(papers, tmp_path / "work").pending == tuple(papers)
+
+
+@pytest.mark.asyncio
+async def test_lone_out_of_memory_output_strikes_the_paper(tmp_path: Path) -> None:
+    poison = paper("doi:oom", input_format="html")
+
+    result = await _convert_with_crashes(tmp_path, [poison])
+
+    assert [item.paper for item in result.failed] == [poison]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_format", ["html", "pdf"])
+async def test_lone_crash_strikes_the_paper_when_the_converter_passes_a_probe(
+    tmp_path: Path, input_format: InputFormat
+) -> None:
+    crash = paper("doi:crash", input_format=input_format)
+
+    result = await _convert_with_crashes(tmp_path, [crash])
+
+    assert [item.paper for item in result.failed] == [crash]
+    assert len(result.state.failures[crash.identifier]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_format", "tool"), [("html", "pandoc"), ("pdf", "docling")]
+)
+async def test_lone_crash_in_a_broken_environment_aborts_without_a_strike(
+    tmp_path: Path, input_format: InputFormat, tool: str
+) -> None:
+    crash = paper("doi:crash", input_format=input_format)
+
+    with pytest.raises(InfrastructureError, match="known-good document"):
+        await _convert_with_crashes(tmp_path, [crash], broken=[tool])
+
+    assert infer_backlog([crash], tmp_path / "work").pending == (crash,)
+
+
+@pytest.mark.asyncio
+async def test_success_with_one_converter_does_not_excuse_another_that_is_broken(
+    tmp_path: Path,
+) -> None:
+    healthy = paper("doi:html", input_format="html")
+    broken = paper("doi:pdf", input_format="pdf")
+
+    with pytest.raises(InfrastructureError, match="docling failed on a known-good"):
+        await _convert_with_crashes(tmp_path, [healthy, broken], broken=["docling"])
+
+    assert infer_backlog([healthy, broken], tmp_path / "work").pending == (
+        healthy,
+        broken,
+    )
+
+
+@pytest.mark.asyncio
+async def test_crash_with_no_time_left_to_probe_stays_pending_without_a_strike(
+    tmp_path: Path,
+) -> None:
+    crash = paper("doi:crash", input_format="html")
+    slow = paper("doi:slow", input_format="html")
+
+    result = await _convert_with_crashes(
+        tmp_path, [crash, slow], time_budget_seconds=1.0
+    )
+
+    assert set(result.interrupted) == {crash, slow}
+    assert result.failed == ()
+    assert result.promoted == ()
+    assert result.state.failures == {}
+
+
+@pytest.mark.conversion
+@pytest.mark.asyncio
+async def test_real_converters_pass_the_crash_probe(tmp_path: Path) -> None:
+    class CrashOnPoison(CommandRunner):
+        async def run(
+            self, argv: Sequence[str], timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            if any("crash" in Path(arg).name for arg in argv):
+                argv = [sys.executable, "-c", "raise SystemExit(1)"]
+            return await super().run(argv, timeout)
+
+    for input_format in ("html", "pdf"):
+        crash = paper(f"doi:crash-{input_format}", input_format=input_format)
+        fixture = FIXTURES / ("text.pdf" if input_format == "pdf" else "sample.html")
+
+        result = await convert_batch(
+            Batch(papers=(crash,), estimated_cost=1),
+            tmp_path,
+            PipelineState(),
+            CONCURRENCY,
+            CrashOnPoison(),
+            FakeMaterializer(fixtures={crash.input_url: fixture}),
+            NOW,
+        )
+
+        assert [item.paper for item in result.failed] == [crash]
+
+
 def _kind_for(argv: Sequence[str]) -> str:
     if argv[0] == "docling":
         return "pdf"
@@ -1341,18 +1768,26 @@ def _write_converter_output(argv: Sequence[str], input_path: Path) -> None:
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        f"# converted {input_path.suffix}\n",
+        f"# converted {input_path.suffix}\n\nBody text.\n",
         encoding="utf-8",
     )
 
 
-def _sleeping_child_script(pid_file: Path) -> str:
+def _sleeping_child_script(pid_file: Path, ready_file: Path | None = None) -> str:
+    """Child that records its pid, writes to both pipes, then sleeps.
+
+    Args:
+        pid_file: Receives the child's pid.
+        ready_file: Created once both pipes hold the child's output.
+    """
+    signal_ready = "" if ready_file is None else f"Path({str(ready_file)!r}).touch(); "
     return (
         "from pathlib import Path; "
         "import os, sys, time; "
         f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
         "print('ready', flush=True); "
         "print('waiting', file=sys.stderr, flush=True); "
+        f"{signal_ready}"
         "time.sleep(30)"
     )
 
@@ -1501,6 +1936,56 @@ async def test_rate_limited_arxiv_html_defers_the_paper_instead_of_falling_back(
     assert result.failed == ()
 
 
+async def _convert_arxiv_html_failure(
+    root: Path, identifier: str, broken: Sequence[str] = ()
+) -> tuple[Paper, convert.ConversionResult]:
+    """Convert an arXiv paper whose HTML fails in pandoc and whose PDF works."""
+    target = arxiv_paper().model_copy(update={"identifier": identifier})
+    workspace = root / "work"
+    workspace.mkdir()
+    result = await convert_batch(
+        Batch(papers=(target,), estimated_cost=1),
+        workspace,
+        PipelineState(),
+        CONCURRENCY,
+        CrashingConverterRunner(root / "converter.py", broken),
+        FakeMaterializer(
+            fixtures={
+                target.input_url: fixture_for(target),
+                ARXIV_HTML_URL: FIXTURES / "arxiv_figures.html",
+            },
+            behaviors={AR5IV_HTML_URL: "paper_error"},
+            downloads={"https://arxiv.org/html/2401.12345/x1.png": png(8, 8)},
+        ),
+        NOW,
+    )
+    return target, result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["badhtml", "corrupthtml", "stubhtml"])
+async def test_arxiv_html_conversion_failure_falls_through_to_the_pdf(
+    tmp_path: Path, failure: str
+) -> None:
+    target, result = await _convert_arxiv_html_failure(tmp_path, f"arxiv:{failure}")
+
+    assert [item.paper for item in result.succeeded] == [target]
+    assert result.failed == ()
+    assert result.state.failures == {}
+    # Figures saved for the abandoned HTML rendering do not outlive it.
+    assert not expected_figures(tmp_path / "work", target).exists()
+
+
+@pytest.mark.asyncio
+async def test_broken_pandoc_aborts_even_when_the_pdf_converts(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(InfrastructureError, match="pandoc failed on a known-good"):
+        await _convert_arxiv_html_failure(tmp_path, "arxiv:badhtml", broken=["pandoc"])
+
+    assert not list((tmp_path / "work").glob("papers/*.md"))
+
+
 @pytest.mark.conversion
 @pytest.mark.asyncio
 async def test_real_converters_turn_a_pdf_and_arxiv_html_into_markdown(
@@ -1542,6 +2027,17 @@ def png(width: int, height: int) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), "white").save(buffer, "PNG")
     return buffer.getvalue()
+
+
+def _png_with_chunks(*chunks: tuple[bytes, bytes]) -> bytes:
+    """Build a PNG from raw chunks with valid checksums."""
+    return b"\x89PNG\r\n\x1a\n" + b"".join(
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data))
+        for kind, data in chunks
+    )
 
 
 @pytest.mark.asyncio
@@ -1604,14 +2100,28 @@ def test_arxiv_lua_filter_writes_equations_as_display_math(tmp_path: Path) -> No
     [
         b"<svg xmlns='http://www.w3.org/2000/svg'/>",  # not a raster image
         png(64, 64)[:-40],  # truncated download
+        _png_with_chunks((b"IHDR", b"\x00" * 5)),  # Pillow raises ValueError
+        _png_with_chunks(  # Pillow raises SyntaxError
+            (b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0)),
+            (b"IDAT", zlib.compress(b"\x00" * 200)[:6]),
+            (b"\x00\x01\x02\x03", b""),
+        ),
     ],
-    ids=["svg", "truncated"],
+    ids=["svg", "truncated", "value-error", "syntax-error"],
 )
 def test_undecodable_figures_are_skipped(tmp_path: Path, payload: bytes) -> None:
     target = tmp_path / "paper.figures" / "figure-1.webp"
 
     assert not write_figure(payload, target)
     assert not target.exists()
+
+
+def test_failed_figure_write_stops_the_run(tmp_path: Path) -> None:
+    blocked = tmp_path / "paper.figures"
+    blocked.write_text("a file where the directory belongs", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        write_figure(png(8, 8), blocked / "figure-1.webp")
 
 
 def test_inline_data_figures_are_written_next_to_the_paper(tmp_path: Path) -> None:
@@ -1655,6 +2165,100 @@ def test_docling_figures_move_next_to_the_paper_and_are_relinked(
         "![Image](paper.figures/figure-1.webp)\n\ntext\n\n\n"
     )
     assert sorted(path.name for path in figures.iterdir()) == ["figure-1.webp"]
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("", False),
+        ("---\nidentifier: a\ntitle: Real title\n---\n\n", False),
+        ("---\nidentifier: a\n---\n\n## Abstract\n", False),
+        ("See pages 1-last of [double.pdf](https://double.pdf)\n", False),
+        ("## Paper\n\nSee pages - of [gan.pdf](https://gan.pdf)\n", False),
+        ("## Abstract\n\nA two sentence note. It is short.\n", True),
+        ("See pages 3 of the appendix for the proof.\n", True),
+        ("See pages 1-2 of [a.pdf](https://a.pdf)\n\nReal text.\n", True),
+        ("<!-- image -->\n", False),
+        ("## Abstract\n\n<!-- formula-not-decoded -->\n", False),
+        ("## Results\n\n![Refer to\ncaption](a.figures/figure-1.webp)\n", False),
+        ("##\nReal body line\n", True),
+        ("<!-- image -->\n\nFigure 1: A caption.\n", True),
+    ],
+)
+def test_has_real_body(markdown: str, expected: bool) -> None:
+    assert has_real_body(markdown) is expected
+
+
+@pytest.mark.asyncio
+async def test_output_with_no_body_fails_the_paper(tmp_path: Path) -> None:
+    stub = paper("doi:stubhtml", input_format="html")
+
+    result = await _convert_with_crashes(tmp_path, [stub])
+
+    assert [item.paper for item in result.failed] == [stub]
+    assert "no body text" in result.state.failures[stub.identifier][0].error
+    assert not expected_markdown(tmp_path / "work", stub).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("identifier", "kept"),
+    [
+        ("doi:garbled", "Body text."),
+        ("doi:garbled-crash", "Body \ufffd\ufffd text."),
+        ("doi:garbled-empty", "Body \ufffd\ufffd text."),
+        ("doi:garbled-truncated", "Body \ufffd\ufffd text."),
+    ],
+)
+async def test_garbled_pdf_output_is_converted_again_with_pdfium(
+    tmp_path: Path, identifier: str, kept: str
+) -> None:
+    target = paper(identifier, input_format="pdf")
+
+    result = await _convert_with_crashes(tmp_path, [target])
+
+    assert [item.paper for item in result.succeeded] == [target]
+    assert kept in expected_markdown(tmp_path / "work", target).read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    ("retry", "first", "expected"),
+    [
+        ("Clean speech model text.", "Clean sp\ufffd\ufffdch model text.", True),
+        ("", "Clean sp\ufffd\ufffdch model text.", False),
+        ("<!-- image -->", "Clean sp\ufffd\ufffdch model text.", False),
+        ("Clean", "Clean sp\ufffd\ufffdch model text.", False),
+        (
+            "Clean m icrophone sp eech model text.",
+            "Clean micr\ufffdphone model text speech.",
+            False,
+        ),
+        ("s ignal p rocessing m odel", "de\ufffdne speci\ufffdc", False),
+        (
+            "Clean model text s ignal p rocessing m odel",
+            "Clean model text de\ufffdne speci\ufffdc",
+            False,
+        ),
+    ],
+)
+def test_is_cleaner_conversion(retry: str, first: str, expected: bool) -> None:
+    assert is_cleaner_conversion(retry, first) is expected
+
+
+def test_requeue_outdated_conversions_leaves_stubs_and_garbled_papers(
+    tmp_path: Path,
+) -> None:
+    stub = paper("arxiv:1", input_format="html")
+    garbled = paper("arxiv:2", input_format="pdf")
+    for item, body in [(stub, "## Abstract\n"), (garbled, "text " * 10 + "\ufffd")]:
+        expected_markdown(tmp_path, item).parent.mkdir(parents=True, exist_ok=True)
+        expected_markdown(tmp_path, item).write_text(body, encoding="utf-8")
+
+    assert requeue_outdated_conversions(tmp_path, [stub, garbled]) == []
+    assert expected_markdown(tmp_path, stub).exists()
+    assert expected_markdown(tmp_path, garbled).exists()
 
 
 def test_requeue_outdated_conversions_removes_only_outdated_papers(
@@ -1710,6 +2314,91 @@ async def test_materialized_inputs_are_named_by_format_not_url(
     )
 
     assert result.suffix == suffix
+
+
+@pytest.mark.asyncio
+async def test_malformed_input_url_fails_only_that_paper(tmp_path: Path) -> None:
+    bad = paper("doi:bad", input_format="html").model_copy(
+        update={"input_url": "https://[malformed/paper.html"}
+    )
+
+    async def downloader(url: str, _timeout: float) -> bytes:
+        raise AssertionError(url)
+
+    result = await convert_batch(
+        Batch(papers=(bad,), estimated_cost=1),
+        tmp_path,
+        PipelineState(),
+        CONCURRENCY,
+        CommandRunner(),
+        DownloadingMaterializer(downloader=downloader),
+        NOW,
+    )
+
+    assert [item.paper for item in result.failed] == [bad]
+    assert "invalid conversion input URL" in (
+        result.state.failures[bad.identifier][0].error
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url", ["https://[malformed/paper.pdf", "https://example.org\uff0f@host/x"]
+)
+async def test_remote_downloader_maps_malformed_urls_to_paper_errors(url: str) -> None:
+    connector = FakeConnector()
+
+    with pytest.raises(PaperError, match="invalid conversion input URL"):
+        await RemoteDownloader(resolver=FakeResolver(), connector=connector).download(
+            url, 1
+        )
+
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_remote_downloader_maps_malformed_redirect_to_paper_error() -> None:
+    connector = FakeConnector(
+        HttpResponse(302, b"", location="https://[malformed/x"),
+    )
+
+    with pytest.raises(PaperError, match="invalid conversion input redirect"):
+        await RemoteDownloader(
+            resolver=FakeResolver(("93.184.216.34",)), connector=connector
+        ).download("https://example.org/start", 1)
+
+
+@pytest.mark.asyncio
+async def test_malformed_figure_url_drops_only_that_figure(
+    tmp_path: Path, state: PipelineState
+) -> None:
+    target = arxiv_paper()
+    html = tmp_path / "bad-figure.html"
+    html.write_text(
+        '<article class="ltx_document"><p>Body text.</p>'
+        '<img src="https://[malformed/x.png"/>'
+        '<img src="x1.png"/></article>',
+        encoding="utf-8",
+    )
+    fake_materializer = FakeMaterializer(
+        fixtures={ARXIV_HTML_URL: html},
+        downloads={"https://arxiv.org/html/x1.png": png(8, 8)},
+    )
+    runner = TrackingRunner(materializer=fake_materializer)
+
+    result = await convert_batch(
+        Batch(papers=(target,), estimated_cost=1),
+        tmp_path,
+        state,
+        CONCURRENCY,
+        runner,
+        fake_materializer,
+        NOW,
+    )
+
+    assert result.succeeded[0].paper == target
+    assert b"malformed" not in runner.inputs[0]
+    assert b"figure-2.webp" in runner.inputs[0]
 
 
 @pytest.mark.asyncio
