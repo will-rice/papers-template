@@ -371,6 +371,13 @@ def huggingface_client(
             ): {
                 "fixture": "adapters/huggingface/page-2.json",
             },
+            _huggingface_route(
+                page=2,
+                page_size=huggingface_config.page_size,
+                date="2024-01-07",
+            ): {
+                "fixture": "adapters/huggingface/empty.json",
+            },
         }
     )
     return _request_client(config=fetch_config, transport=transport)
@@ -390,7 +397,14 @@ def huggingface_malformed_client(
                 date="2024-01-07",
             ): {
                 "fixture": "adapters/huggingface/page-malformed-record.json",
-            }
+            },
+            _huggingface_route(
+                page=1,
+                page_size=huggingface_config.page_size,
+                date="2024-01-07",
+            ): {
+                "fixture": "adapters/huggingface/empty.json",
+            },
         }
     )
     return _request_client(config=fetch_config, transport=transport)
@@ -436,6 +450,13 @@ def huggingface_out_of_window_only_client(
                 date="2024-01-07",
             ): {
                 "fixture": "adapters/huggingface/page-2.json",
+            },
+            _huggingface_route(
+                page=2,
+                page_size=1,
+                date="2024-01-07",
+            ): {
+                "fixture": "adapters/huggingface/empty.json",
             },
         }
     )

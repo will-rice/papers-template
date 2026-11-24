@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 
 from papers_pipeline.adapters.base import FetchWindow
@@ -24,68 +25,28 @@ async def test_huggingface_contract(
 
 
 @pytest.mark.asyncio
-async def test_huggingface_continuation_cursor_is_deterministic_and_opaque(
+async def test_huggingface_reads_a_whole_day_and_cursor_names_the_next_day(
     huggingface_client: RequestClient, huggingface_config: AdapterConfig
 ) -> None:
+    window = FetchWindow(
+        start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+    )
     adapter = HuggingFaceAdapter()
-    first_page = await adapter.fetch(
-        window=FetchWindow(
-            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
-        ),
-        cursor=None,
-        client=huggingface_client,
-        config=huggingface_config,
-    )
 
-    page = await adapter.fetch(
-        window=FetchWindow(
-            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
-        ),
-        cursor=first_page.next_cursor,
-        client=huggingface_client,
-        config=huggingface_config,
-    )
+    page = await adapter.fetch(window, None, huggingface_client, huggingface_config)
+    repeat = await adapter.fetch(window, None, huggingface_client, huggingface_config)
 
-    assert first_page.next_cursor
-    assert first_page.next_cursor != "1"
-    assert tuple(record.source_id for record in page.records) == ("2401.00002",)
+    assert tuple(record.source_id for record in page.records) == (
+        "2401.00001",
+        "2401.00003",
+        "2401.00002",
+    )
     assert page.next_cursor
-    assert page.next_cursor != first_page.next_cursor
+    assert page.next_cursor != "1"
+    assert page.next_cursor == repeat.next_cursor
     assert page.capped is False
     assert page.permanent_errors == ()
-
-
-@pytest.mark.asyncio
-async def test_huggingface_max_pages_sets_capped_without_dropping_cursor(
-    huggingface_client: RequestClient, huggingface_config: AdapterConfig
-) -> None:
-    adapter = HuggingFaceAdapter()
-    first_page = await adapter.fetch(
-        window=FetchWindow(
-            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
-        ),
-        cursor=None,
-        client=huggingface_client,
-        config=huggingface_config,
-    )
-
-    page = await adapter.fetch(
-        window=FetchWindow(
-            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
-        ),
-        cursor=first_page.next_cursor,
-        client=huggingface_client,
-        config=huggingface_config.model_copy(
-            update={"max_pages": 2, "max_results": 10}
-        ),
-    )
-
-    assert page.next_cursor
-    assert page.capped is False
 
 
 @pytest.mark.asyncio
@@ -104,10 +65,7 @@ async def test_huggingface_max_results_sets_capped_without_dropping_cursor(
         ),
     )
 
-    assert tuple(record.source_id for record in page.records) == (
-        "2401.00001",
-        "2401.00003",
-    )
+    assert tuple(record.source_id for record in page.records) == ("2401.00001",)
     assert page.next_cursor
     assert page.capped is True
 
@@ -164,9 +122,8 @@ async def test_huggingface_keeps_papers_listed_long_after_publication(
     huggingface_out_of_window_only_client: RequestClient,
     huggingface_config: AdapterConfig,
 ) -> None:
-    adapter = HuggingFaceAdapter()
     one_per_page = huggingface_config.model_copy(update={"page_size": 1})
-    first_page = await adapter.fetch(
+    page = await HuggingFaceAdapter().fetch(
         window=FetchWindow(
             start=datetime(2024, 1, 1, tzinfo=timezone.utc),
             end=datetime(2024, 1, 8, tzinfo=timezone.utc),
@@ -176,21 +133,13 @@ async def test_huggingface_keeps_papers_listed_long_after_publication(
         config=one_per_page,
     )
 
-    second_page = await adapter.fetch(
-        window=FetchWindow(
-            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 8, tzinfo=timezone.utc),
-        ),
-        cursor=first_page.next_cursor,
-        client=huggingface_out_of_window_only_client,
-        config=one_per_page,
+    assert tuple(record.source_id for record in page.records) == (
+        "2312.12345",
+        "2401.00002",
     )
-
-    assert tuple(record.source_id for record in first_page.records) == ("2312.12345",)
-    assert first_page.next_cursor
-    assert first_page.capped is False
-    assert first_page.permanent_errors == ()
-    assert tuple(record.source_id for record in second_page.records) == ("2401.00002",)
+    assert page.next_cursor
+    assert page.capped is False
+    assert page.permanent_errors == ()
 
 
 @pytest.mark.asyncio
@@ -270,31 +219,35 @@ async def test_huggingface_enumerates_each_utc_date_and_resumes_mid_range(
     # rejects days it has not published yet.
     page = await adapter.fetch(window, None, client, huggingface_config)
     assert tuple(record.source_id for record in page.records) == ("2401.00007",)
-    resume_cursor = page.next_cursor
 
-    page = await adapter.fetch(window, resume_cursor, client, huggingface_config)
-    assert page.records == ()
     page = await adapter.fetch(window, page.next_cursor, client, huggingface_config)
     assert tuple(record.source_id for record in page.records) == ("2401.00006",)
-    page = await adapter.fetch(window, page.next_cursor, client, huggingface_config)
-    assert page.records == ()
     assert page.next_cursor is None
 
 
 @pytest.mark.asyncio
-async def test_huggingface_saved_page_cursor_rereads_its_day(
+@pytest.mark.parametrize(
+    "saved_cursor",
+    [
+        # Saved by an unfinished backfill: {"date":"2025-06-11","page":1,...}.
+        "eyJkYXRlIjoiMjAyNS0wNi0xMSIsInBhZ2UiOjEsInNvdXJjZV9jb25zdW1lZCI6Mjc3OH0",
+        # {"date":"2025-06-11","offset":3,"source_consumed":3}.
+        "eyJkYXRlIjoiMjAyNS0wNi0xMSIsIm9mZnNldCI6Mywic291cmNlX2NvbnN1bWVkIjozfQ",
+    ],
+)
+async def test_huggingface_saved_cursor_rereads_its_day(
+    saved_cursor: str,
     fixture_transport: FixtureTransport,
     fetch_config: FetchConfig,
     huggingface_config: AdapterConfig,
 ) -> None:
-    # Saved by an unfinished backfill: {"date":"2025-06-11","page":1,...}.
-    saved_cursor = (
-        "eyJkYXRlIjoiMjAyNS0wNi0xMSIsInBhZ2UiOjEsInNvdXJjZV9jb25zdW1lZCI6Mjc3OH0"
-    )
     transport = fixture_transport(
         {
             "https://huggingface.co/api/daily_papers?date=2025-06-11&p=0&limit=2": {
                 "fixture": "adapters/huggingface/page.json"
+            },
+            "https://huggingface.co/api/daily_papers?date=2025-06-11&p=1&limit=2": {
+                "fixture": "adapters/huggingface/empty.json"
             },
         }
     )
@@ -316,3 +269,108 @@ async def test_huggingface_saved_page_cursor_rereads_its_day(
         "2401.00001",
         "2401.00003",
     )
+
+
+def listed_paper(identifier: str) -> dict[str, object]:
+    return {
+        "paper": {
+            "id": identifier,
+            "title": f"Paper {identifier}",
+            "summary": "Abstract.",
+            "publishedAt": "2024-01-07T00:00:00.000Z",
+            "authors": [{"name": "A. Author"}],
+        }
+    }
+
+
+def replay_client(
+    responses: dict[tuple[str, str, str], list[dict[str, object]]],
+    fetch_config: FetchConfig,
+) -> RequestClient:
+    def replay(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        key = (params["date"], params["p"], params["limit"])
+        return httpx.Response(200, json=responses[key], request=request)
+
+    return RequestClient(
+        fetch_config,
+        Deadline.start(fetch_config.total_deadline_seconds),
+        transport=httpx.MockTransport(replay),
+    )
+
+
+@pytest.mark.asyncio
+async def test_huggingface_day_reordered_between_runs_loses_no_paper(
+    fetch_config: FetchConfig, huggingface_config: AdapterConfig
+) -> None:
+    first, second, climber = (
+        listed_paper("2401.00001"),
+        listed_paper("2401.00002"),
+        listed_paper("2401.00003"),
+    )
+    window = FetchWindow(
+        start=datetime(2024, 1, 7, tzinfo=timezone.utc),
+        end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+    )
+    adapter = HuggingFaceAdapter()
+    stopped = await adapter.fetch(
+        window,
+        None,
+        replay_client({("2024-01-07", "0", "2"): [first, second]}, fetch_config),
+        huggingface_config.model_copy(update={"max_results": 2}),
+    )
+    # The unread paper has climbed above the two already read.
+    reordered = replay_client(
+        {
+            ("2024-01-07", "0", "2"): [climber, first],
+            ("2024-01-07", "1", "2"): [second],
+            ("2024-01-07", "2", "2"): [],
+        },
+        fetch_config,
+    )
+
+    seen = [record.source_id for record in stopped.records]
+    cursor = stopped.next_cursor
+    while cursor is not None:
+        page = await adapter.fetch(window, cursor, reordered, huggingface_config)
+        seen.extend(record.source_id for record in page.records)
+        cursor = page.next_cursor
+
+    assert set(seen) == {"2401.00001", "2401.00002", "2401.00003"}
+
+
+@pytest.mark.asyncio
+async def test_huggingface_day_over_the_budget_is_reported_and_passed(
+    fetch_config: FetchConfig, huggingface_config: AdapterConfig
+) -> None:
+    client = replay_client(
+        {
+            ("2024-01-07", "0", "2"): [
+                listed_paper("2401.00001"),
+                listed_paper("2401.00002"),
+            ],
+            ("2024-01-06", "0", "2"): [listed_paper("2401.00006")],
+            ("2024-01-06", "1", "2"): [],
+        },
+        fetch_config,
+    )
+    window = FetchWindow(
+        start=datetime(2024, 1, 6, tzinfo=timezone.utc),
+        end=datetime(2024, 1, 8, tzinfo=timezone.utc),
+    )
+    adapter = HuggingFaceAdapter()
+    budget = huggingface_config.model_copy(update={"max_results": 2})
+
+    stopped = await adapter.fetch(window, None, client, budget)
+    retried = await adapter.fetch(window, stopped.next_cursor, client, budget)
+    older_day = await adapter.fetch(window, retried.next_cursor, client, budget)
+
+    assert stopped.capped is True
+    assert stopped.permanent_errors == ()
+    assert retried.capped is False
+    assert retried.permanent_errors == (
+        "huggingface day 2024-01-07 reached the budget of 2 papers; "
+        "any papers past it were not fetched",
+    )
+    assert tuple(record.source_id for record in older_day.records) == ("2401.00006",)
+    assert older_day.next_cursor is None

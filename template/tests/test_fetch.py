@@ -1429,6 +1429,6 @@ async def test_huggingface_budget_stop_mid_day_loses_no_paper_next_run() -> None
     assert len(first.records) == 19
     assert "huggingface" in first.state.continuations
     assert "huggingface" not in second.state.continuations
-    assert sorted(record.source_id for record in first.records + second.records) == [
+    assert sorted({record.source_id for record in first.records + second.records}) == [
         f"2609.{number:05d}" for number in range(21)
     ]
