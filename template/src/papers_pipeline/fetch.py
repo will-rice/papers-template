@@ -1,10 +1,15 @@
 """Cross-source fetch orchestration with shared deadlines and continuation state."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 
-from papers_pipeline.adapters.base import Adapter, FetchPage, FetchWindow
+from papers_pipeline.adapters.base import (
+    Adapter,
+    FetchPage,
+    FetchWindow,
+    ForwardAdapter,
+)
 from papers_pipeline.config import AdapterConfig, PipelineConfig
 from papers_pipeline.errors import InfrastructureError, SourceUnavailableError
 from papers_pipeline.http import Deadline, RequestClient
@@ -265,9 +270,13 @@ async def _fetch_forward(
     truncated = False
     unavailable: SourceUnavailableError | None = None
     finished = False
+    fetch_page = (
+        adapter.fetch_forward if isinstance(adapter, ForwardAdapter) else adapter.fetch
+    )
     while True:
         chunk = await _fetch_window(
             adapter,
+            fetch_page,
             config,
             adapter_index,
             span,
@@ -427,6 +436,7 @@ async def _backfill(
     while plan is not None and pages_left > 0 and results_left > 0:
         chunk = await _fetch_window(
             adapter,
+            adapter.fetch,
             config,
             adapter_index,
             plan.window,
@@ -489,6 +499,9 @@ async def _backfill(
 
 async def _fetch_window(
     adapter: Adapter,
+    fetch_page: Callable[
+        [FetchWindow, str | None, RequestClient, AdapterConfig], Awaitable[FetchPage]
+    ],
     config: PipelineConfig,
     adapter_index: int,
     window: FetchWindow,
@@ -509,7 +522,7 @@ async def _fetch_window(
     while pages_fetched < max_pages:
         remaining = max_results - len(records)
         try:
-            page = await adapter.fetch(
+            page = await fetch_page(
                 window, cursor, client, _page_config(config, adapter_index, remaining)
             )
         except SourceUnavailableError as error:
